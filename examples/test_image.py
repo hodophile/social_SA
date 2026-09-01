@@ -32,6 +32,8 @@ def main():
 
     result = analyzer.analyze(post)
 
+    import pdb;pdb.set_trace()
+
     print("\n--- IMAGE RESULT ---")
     print("visual:", result["understanding"]["visual_description"])
     print("action:", result["action"])

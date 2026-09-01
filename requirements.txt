@@ -1,0 +1,13 @@
+# Core pipeline + examples (mock PLM works with only these)
+opencv-python-headless>=4.8
+numpy>=1.24
+
+# Real model inference (PLM1B with --real-model / mock=False)
+torch>=2.1
+torchvision>=0.16  # required by Qwen2.5-VL's video processor
+transformers>=4.45
+accelerate>=0.30
+qwen-vl-utils>=0.0.8  # only for the default Qwen2.5-VL checkpoint
+
+# Note: ffmpeg/ffprobe must be installed separately (system package),
+# e.g.  sudo apt install ffmpeg   /   brew install ffmpeg
