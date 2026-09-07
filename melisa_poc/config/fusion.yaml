@@ -1,0 +1,32 @@
+# =============================================================================
+# MyUni POC multimodal fusion configuration
+# =============================================================================
+# These values are POC EVALUATION DEFAULTS only.
+# They are NOT the client's future business / scoring methodology.
+# They are NOT scientifically validated thresholds.
+# Edit this file to tune fusion without changing Python code.
+# =============================================================================
+
+note: >
+  Transparent late fusion for the MyUni sentiment POC.
+  overall_score = sum(score_i * weight_i * confidence_i) / sum(weight_i * confidence_i)
+
+# Relative importance of each modality when present (POC defaults).
+modality_weights:
+  text: 1.0      # caption / primary text
+  visual: 1.0    # image or aggregated video-frame visual
+  ocr: 0.8       # text extracted from images/frames
+  speech: 1.0    # ASR transcript sentiment
+
+# Map fused numeric score in [-1, +1] to labels (POC defaults).
+thresholds:
+  positive_above: 0.15   # score > positive_above => positive
+  negative_below: -0.15  # score < negative_below => negative
+  # scores in [negative_below, positive_above] => neutral
+
+# Conflict detection among high-confidence, polarized modalities.
+conflict:
+  min_confidence: 0.40       # ignore low-confidence modalities for conflict checks
+  min_polarity: 0.35         # |score| must exceed this to count as "strong"
+  disagreement_threshold: 0.90  # max(score)-min(score) among strong modalities
+  confidence_penalty: 0.50   # when conflicting, multiply overall confidence by (1 - penalty)
