@@ -15,7 +15,10 @@ import gradio as gr
 # ----------------------------------------------------------------------
 # Import the two pipelines
 # ----------------------------------------------------------------------
-from melisa_poc.src.pipeline import MyUniSentimentPipeline   # original Melisa
+import sys
+sys.path.append(str(Path(__file).parent / "melisa_poc"))
+from src.pipeline import MyUniSentimentPipeline   # original Melisa
+
 from melisa_temporal_emotion.pipeline import TemporalEmotionPipeline   # new
 
 # ----------------------------------------------------------------------
