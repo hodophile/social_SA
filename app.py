@@ -16,7 +16,7 @@ import gradio as gr
 # Import the two pipelines
 # ----------------------------------------------------------------------
 import sys
-sys.path.append(str(Path(__file).parent / "melisa_poc"))
+sys.path.append(str(Path(__file__).parent / "melisa_poc"))
 from src.pipeline import MyUniSentimentPipeline   # original Melisa
 
 from melisa_temporal_emotion.pipeline import TemporalEmotionPipeline   # new
@@ -24,10 +24,10 @@ from melisa_temporal_emotion.pipeline import TemporalEmotionPipeline   # new
 # ----------------------------------------------------------------------
 # Configuration – defaults (can be overridden via Space secrets / env vars)
 # ----------------------------------------------------------------------
-MOCK = os.environ.get("PLM_MOCK", "0") == "1"          # 0 = real model, 1 = mock
+MOCK = os.environ.get("PLM_MOCK", "0") == "1"          # 0 = real model, 1 = mock (not used by Melisa pipeline)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
-QWEN_MODEL = os.environ.get("QWEN_MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")
+QWEN_MODEL = os.environ.get("QWEN_MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")  # kept for compatibility but not used
 
 # ----------------------------------------------------------------------
 # Lazy‑loaded pipeline singletons
@@ -40,8 +40,7 @@ def get_melisa_pipeline() -> MyUniSentimentPipeline:
     global _melisa_pipeline
     if _melisa_pipeline is None:
         _melisa_pipeline = MyUniSentimentPipeline(
-            model_path=None if not MOCK else None,   # None means use default HF model
-            mock=MOCK,
+            # No model_path or mock arguments; MyUniSentimentPipeline uses defaults.
         )
     return _melisa_pipeline
 

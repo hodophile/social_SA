@@ -113,7 +113,7 @@ class VideoAnalyzer:
         if total > 0:
             for e in agg:
                 agg[e] /= total
-    return agg
+        return agg
 
     # ------------------------------------------------------------------
     # Main analyse method – matches the signature used by Melisa’s pipeline

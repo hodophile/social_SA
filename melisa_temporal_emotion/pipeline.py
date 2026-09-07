@@ -7,25 +7,56 @@ emotion_analysis).
 """
 from __future__ import annotations
 
+from dataclasses import field
 import time
 import json
 from pathlib import Path
 from typing import Optional, Union
+from pydantic.dataclasses import dataclass
 
 import requests
 
 from melisa_poc.src.schemas import (
     SentimentEvidence,
-    SocialMediaPost,
+    SpeechAnalysisResult,
+    VideoDiagnostics,
+    # SocialMediaPost,
 )
 from melisa_poc.src.analyzers.text import TextSentimentAnalyzer
 from melisa_poc.src.analyzers.image import ImageAnalyzer
 from melisa_poc.src.analyzers.audio import AudioAnalyzer
 from melisa_poc.src.fusion import fuse_modalities, DEFAULT_FUSION
-from melisa_temporal_emotion.video_analyzer import VideoAnalyzer, VideoAnalysisBundle
+from melisa_temporal_emotion.video_analyzer import VideoAnalyzer
 from melisa_temporal_emotion.text_analyzer import caption_to_emotion
 from melisa_temporal_emotion.models import EmotionNet
 
+@dataclass
+class VideoAnalysisBundle:
+    """Pre-activity multimodal evidence for one video (pipeline wraps into ActivityAnalysisResult)."""
+
+    visual: Optional[SentimentEvidence]
+    ocr: Optional[SentimentEvidence]
+    ocr_text: Optional[str]
+    speech: Optional[SentimentEvidence]
+    transcript: Optional[str]
+    speech_result: Optional[SpeechAnalysisResult]
+    diagnostics: VideoDiagnostics
+    warnings: list[str] = field(default_factory=list)
+    overall: Optional[SentimentEvidence] = None
+
+@dataclass
+class SocialMediaPost:
+    """
+    Raw social-media post.
+
+    A post may contain text, an image, a video, or any
+    combination of these.
+    """
+
+    post_id: str
+    text: Optional[str] = None
+    image_path: Optional[Path] = None
+    video_path: Optional[Path] = None
 
 PathLike = Union[str, Path]
 EMOTION_LABELS = [
