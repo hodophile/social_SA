@@ -3,317 +3,105 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SA Sentiment Analysis — Melisa vs Timestamp-LLM</title>
+<title>SA Sentiment Analysis</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #f5f5f7;
     color: #1d1d1f;
-    line-height: 1.6;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     padding: 20px;
   }
-  .container { max-width: 1200px; margin: 0 auto; }
-  h1 { text-align: center; margin-bottom: 8px; font-size: 1.8rem; }
-  .subtitle { text-align: center; color: #666; margin-bottom: 24px; font-size: 0.95rem; }
-
-  .input-card {
-    background: #fff;
-    border-radius: 12px;
-    padding: 24px;
-    margin-bottom: 24px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-  }
-  label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.9rem; }
-  textarea, input[type="file"], input[type="number"] {
+  .container {
+    max-width: 600px;
     width: 100%;
-    padding: 10px 12px;
-    border: 1px solid #d1d1d6;
-    border-radius: 8px;
-    font-size: 0.95rem;
-    margin-bottom: 16px;
+    text-align: center;
   }
-  textarea { min-height: 80px; resize: vertical; }
-  .row { display: flex; gap: 16px; flex-wrap: wrap; }
-  .col { flex: 1; min-width: 220px; }
-
-  button {
-    background: #0071e3;
-    color: #fff;
-    border: none;
-    padding: 12px 28px;
-    border-radius: 8px;
-    font-size: 1rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.2s;
+  h1 { font-size: 2.2rem; margin-bottom: 8px; }
+  .subtitle { color: #666; margin-bottom: 40px; font-size: 1rem; }
+  .cards {
+    display: grid;
+    gap: 20px;
   }
-  button:hover { background: #005bb5; }
-  button:disabled { background: #999; cursor: not-allowed; }
-
-  .results { display: none; }
-  .results.active { display: block; }
-
-  .comparison-bar {
+  .card {
     background: #fff;
-    border-radius: 12px;
-    padding: 20px;
-    margin-bottom: 20px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border-radius: 16px;
+    padding: 32px 24px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    text-decoration: none;
+    color: inherit;
+    transition: transform 0.2s, box-shadow 0.2s;
+    display: block;
   }
-  .match-badge {
+  .card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+  }
+  .card h2 { font-size: 1.4rem; margin-bottom: 8px; }
+  .card p { color: #666; font-size: 0.95rem; line-height: 1.5; }
+  .badge {
     display: inline-block;
     padding: 4px 12px;
     border-radius: 20px;
-    font-size: 0.8rem;
+    font-size: 0.75rem;
     font-weight: 600;
-    margin-left: 8px;
+    margin-top: 12px;
   }
-  .match-yes { background: #d4edda; color: #155724; }
-  .match-no  { background: #f8d7da; color: #721c24; }
-
-  .two-col {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 20px;
-  }
-  @media (max-width: 768px) {
-    .two-col { grid-template-columns: 1fr; }
-  }
-
-  .result-card {
+  .badge-green { background: #d4edda; color: #155724; }
+  .badge-blue { background: #cce5ff; color: #004085; }
+  .badge-purple { background: #e2d4f0; color: #4a2c6a; }
+  .api-note {
+    margin-top: 32px;
+    padding: 16px;
     background: #fff;
     border-radius: 12px;
-    padding: 20px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-  }
-  .result-card h3 {
-    font-size: 1rem;
-    margin-bottom: 12px;
-    padding-bottom: 8px;
-    border-bottom: 2px solid #e5e5ea;
-  }
-  .result-card.melisa h3 { border-color: #34c759; }
-  .result-card.llm   h3 { border-color: #0071e3; }
-
-  .emotion-bar {
-    display: flex;
-    align-items: center;
-    margin-bottom: 6px;
     font-size: 0.85rem;
+    color: #555;
   }
-  .emotion-label { width: 90px; font-weight: 500; }
-  .emotion-track {
-    flex: 1;
-    height: 18px;
+  .api-note code {
     background: #f2f2f7;
+    padding: 2px 6px;
     border-radius: 4px;
-    overflow: hidden;
-    margin: 0 8px;
-  }
-  .emotion-fill {
-    height: 100%;
-    border-radius: 4px;
-    transition: width 0.5s ease;
-  }
-  .emotion-val { width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
-
-  .json-block {
-    background: #1e1e1e;
-    color: #d4d4d4;
-    padding: 16px;
-    border-radius: 8px;
     font-family: "SF Mono", Monaco, monospace;
-    font-size: 0.8rem;
-    overflow-x: auto;
-    max-height: 400px;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-
-  .loading {
-    text-align: center;
-    padding: 40px;
-    color: #666;
-  }
-  .spinner {
-    display: inline-block;
-    width: 32px;
-    height: 32px;
-    border: 3px solid #e5e5ea;
-    border-top-color: #0071e3;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    margin-bottom: 12px;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  .error-box {
-    background: #f8d7da;
-    color: #721c24;
-    padding: 16px;
-    border-radius: 8px;
-    margin-bottom: 16px;
   }
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>Social Media Post Analysis</h1>
-  <p class="subtitle">Side-by-side comparison: Melisa POC vs Timestamp-LLM-Fusion</p>
+  <h1>SA Social Media Sentiment Analysis</h1>
+  <p class="subtitle">Choose a pipeline to analyze your content</p>
 
-  <div class="input-card">
-    <div class="row">
-      <div class="col">
-        <label for="text">Post text / caption</label>
-        <textarea id="text" placeholder="Enter text here..."></textarea>
-      </div>
-      <div class="col">
-        <label for="image">Image (optional)</label>
-        <input type="file" id="image" accept="image/*">
-      </div>
-      <div class="col">
-        <label for="video">Video (optional)</label>
-        <input type="file" id="video" accept="video/*">
-      </div>
-      <div class="col">
-        <label for="fps">Frame sampling (fps)</label>
-        <input type="number" id="fps" value="1.0" step="0.2" min="0.2" max="5.0">
-      </div>
-    </div>
-    <button id="analyzeBtn" onclick="runAnalysis()">Analyze with both</button>
+  <div class="cards">
+    <a href="/initial" class="card">
+      <h2>Initial Setup</h2>
+      <p>Melisa POC — per-modality models with late fusion. SigLIP visual + RoBERTa text + Whisper audio. Outputs 3-class sentiment mapped to emotions.</p>
+      <span class="badge badge-green">Melisa POC</span>
+    </a>
+
+    <a href="/latest" class="card">
+      <h2>Latest Setup</h2>
+      <p>Timestamp-LLM-Fusion — per-frame SigLIP with timestamps + Whisper + OpenRouter LLM. LLM synthesizes temporal dynamics and cross-modal context.</p>
+      <span class="badge badge-blue">SigLIP + LLM</span>
+    </a>
+
+    <a href="/compare" class="card">
+      <h2>Compare Both</h2>
+      <p>Side-by-side comparison of Initial (Melisa) vs Latest (Timestamp-LLM). See how the two pipelines differ on the same input.</p>
+      <span class="badge badge-purple">Side-by-Side</span>
+    </a>
   </div>
 
-  <div id="loading" class="loading" style="display:none;">
-    <div class="spinner"></div>
-    <div>Analyzing... this may take 30-60 seconds for video</div>
-  </div>
-
-  <div id="error" class="error-box" style="display:none;"></div>
-
-  <div id="results" class="results">
-    <div class="comparison-bar">
-      <strong>Comparison Summary</strong>
-      <span id="matchBadge"></span>
-      <div id="comparisonDetails" style="margin-top:8px; font-size:0.9rem; color:#555;"></div>
-    </div>
-
-    <div class="two-col">
-      <div class="result-card melisa">
-        <h3>Initial Version — Melisa POC</h3>
-        <div id="melisaViz"></div>
-        <details style="margin-top:12px;">
-          <summary style="cursor:pointer; font-size:0.85rem; color:#555;">Raw JSON</summary>
-          <pre class="json-block" id="melisaJson"></pre>
-        </details>
-      </div>
-
-      <div class="result-card llm">
-        <h3>Timestamp-LLM — SigLIP + OpenRouter</h3>
-        <div id="llmViz"></div>
-        <details style="margin-top:12px;">
-          <summary style="cursor:pointer; font-size:0.85rem; color:#555;">Raw JSON</summary>
-          <pre class="json-block" id="llmJson"></pre>
-        </details>
-      </div>
-    </div>
+  <div class="api-note">
+    <strong>API Endpoints:</strong><br>
+    <code>POST /api/initial/analyze</code> — Melisa only<br>
+    <code>POST /api/latest/analyze</code> — Timestamp-LLM only<br>
+    <code>POST /api/compare/analyze</code> — both + comparison<br>
+    <code>GET /docs</code> — Swagger UI
   </div>
 </div>
-
-<script>
-const EMOTION_COLORS = {
-  joy: '#34c759', sadness: '#5ac8fa', anger: '#ff3b30', fear: '#ff9500',
-  surprise: '#af52de', disgust: '#a2845e', trust: '#0071e3', anticipation: '#ffcc00'
-};
-
-function emotionBars(scores) {
-  if (!scores) return '<p style="color:#888; font-size:0.85rem;">No emotion scores</p>';
-  const entries = Object.entries(scores).sort((a,b) => b[1] - a[1]);
-  return entries.map(([e, s]) => {
-    const pct = Math.round(s * 100);
-    const color = EMOTION_COLORS[e] || '#999';
-    return `<div class="emotion-bar">
-      <span class="emotion-label">${e}</span>
-      <div class="emotion-track"><div class="emotion-fill" style="width:${pct}%; background:${color};"></div></div>
-      <span class="emotion-val">${pct}%</span>
-    </div>`;
-  }).join('');
-}
-
-async function runAnalysis() {
-  const btn = document.getElementById('analyzeBtn');
-  const loading = document.getElementById('loading');
-  const error = document.getElementById('error');
-  const results = document.getElementById('results');
-
-  btn.disabled = true;
-  loading.style.display = 'block';
-  error.style.display = 'none';
-  results.classList.remove('active');
-
-  const form = new FormData();
-  const text = document.getElementById('text').value;
-  const image = document.getElementById('image').files[0];
-  const video = document.getElementById('video').files[0];
-  const fps = document.getElementById('fps').value;
-
-  if (text) form.append('text', text);
-  if (image) form.append('image', image);
-  if (video) form.append('video', video);
-  form.append('sample_fps', fps);
-
-  try {
-    const res = await fetch('/analyze', { method: 'POST', body: form });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-    const data = await res.json();
-
-    // Comparison
-    const comp = data.comparison;
-    const match = comp.emotions_match;
-    document.getElementById('matchBadge').innerHTML =
-      `<span class="match-badge ${match ? 'match-yes' : 'match-no'}">${match ? '✓ Match' : '✗ Mismatch'}</span>`;
-
-    let details = '';
-    if (comp.initial_version.matched_emotion) {
-      details += `Melisa: <strong>${comp.initial_version.matched_emotion}</strong> (valence ${comp.initial_version.valence?.toFixed?.(2) ?? 'N/A'})`;
-    }
-    if (comp.timestamp_llm_version.primary_emotion) {
-      details += ` &nbsp;|&nbsp; LLM: <strong>${comp.timestamp_llm_version.primary_emotion}</strong> (valence ${comp.timestamp_llm_version.valence?.toFixed?.(2) ?? 'N/A'})`;
-    }
-    if (comp.valence_gap !== undefined) {
-      details += ` &nbsp;|&nbsp; Valence gap: <strong>${comp.valence_gap}</strong>`;
-    }
-    document.getElementById('comparisonDetails').innerHTML = details;
-
-    // Melisa
-    const melisa = data.melisa;
-    document.getElementById('melisaViz').innerHTML = emotionBars(melisa.emotion_distribution);
-    document.getElementById('melisaJson').textContent = JSON.stringify(melisa, null, 2);
-
-    // LLM
-    const llm = data.timestamp_llm;
-    const llmEmo = llm.emotion_analysis || {};
-    let llmHtml = '';
-    if (llmEmo.rationale) {
-      llmHtml += `<p style="font-size:0.85rem; color:#555; margin-bottom:12px; font-style:italic;">"${llmEmo.rationale}"</p>`;
-    }
-    llmHtml += emotionBars(llmEmo.emotion_scores);
-    if (llm.frame_timestamps && llm.frame_timestamps.length > 0) {
-      llmHtml += `<p style="font-size:0.8rem; color:#888; margin-top:10px;">${llm.frame_timestamps.length} frames analyzed with timestamps</p>`;
-    }
-    document.getElementById('llmViz').innerHTML = llmHtml;
-    document.getElementById('llmJson').textContent = JSON.stringify(llm, null, 2);
-
-    results.classList.add('active');
-  } catch (err) {
-    error.textContent = err.message;
-    error.style.display = 'block';
-  } finally {
-    btn.disabled = false;
-    loading.style.display = 'none';
-  }
-}
-</script>
 </body>
 </html>

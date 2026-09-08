@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Initial Setup — Melisa POC</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f5f5f7;
+    color: #1d1d1f;
+    line-height: 1.6;
+    padding: 20px;
+  }
+  .container { max-width: 800px; margin: 0 auto; }
+  .nav { margin-bottom: 20px; }
+  .nav a { color: #0071e3; text-decoration: none; font-size: 0.9rem; }
+  h1 { font-size: 1.6rem; margin-bottom: 4px; }
+  .subtitle { color: #666; font-size: 0.9rem; margin-bottom: 24px; }
+
+  .input-card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 24px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+  label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.9rem; }
+  textarea, input[type="file"] {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #d1d1d6;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    margin-bottom: 16px;
+  }
+  textarea { min-height: 80px; resize: vertical; }
+  button {
+    background: #34c759;
+    color: #fff;
+    border: none;
+    padding: 12px 28px;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { background: #248a3d; }
+  button:disabled { background: #999; cursor: not-allowed; }
+
+  .result-card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    display: none;
+  }
+  .result-card.active { display: block; }
+  .result-card h3 {
+    font-size: 1rem;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid #34c759;
+  }
+
+  .emotion-bar {
+    display: flex;
+    align-items: center;
+    margin-bottom: 6px;
+    font-size: 0.85rem;
+  }
+  .emotion-label { width: 90px; font-weight: 500; }
+  .emotion-track {
+    flex: 1;
+    height: 18px;
+    background: #f2f2f7;
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 0 8px;
+  }
+  .emotion-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.5s ease;
+  }
+  .emotion-val { width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
+
+  .json-block {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 16px;
+    border-radius: 8px;
+    font-family: "SF Mono", Monaco, monospace;
+    font-size: 0.8rem;
+    overflow-x: auto;
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .loading { text-align: center; padding: 40px; color: #666; display: none; }
+  .spinner {
+    display: inline-block;
+    width: 32px;
+    height: 32px;
+    border: 3px solid #e5e5ea;
+    border-top-color: #34c759;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-bottom: 12px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-box {
+    background: #f8d7da;
+    color: #721c24;
+    padding: 16px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    display: none;
+  }
+
+  .info-box {
+    background: #d4edda;
+    color: #155724;
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    font-size: 0.85rem;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="nav"><a href="/">← Back to home</a></div>
+  <h1>Initial Setup — Melisa POC</h1>
+  <p class="subtitle">Per-modality models + confidence-weighted late fusion → 3-class sentiment</p>
+
+  <div class="info-box">
+    <strong>Pipeline:</strong> RoBERTa (text) + SigLIP (visual) + Whisper→RoBERTa (audio) → late fusion → positive/neutral/negative → mapped to joy/trust/sadness
+  </div>
+
+  <div class="input-card">
+    <label for="text">Post text / caption</label>
+    <textarea id="text" placeholder="Enter text here..."></textarea>
+
+    <label for="image">Image (optional)</label>
+    <input type="file" id="image" accept="image/*">
+
+    <label for="video">Video (optional)</label>
+    <input type="file" id="video" accept="video/*">
+
+    <button id="analyzeBtn" onclick="runAnalysis()">Analyze with Melisa POC</button>
+  </div>
+
+  <div id="loading" class="loading">
+    <div class="spinner"></div>
+    <div>Analyzing...</div>
+  </div>
+
+  <div id="error" class="error-box"></div>
+
+  <div id="result" class="result-card">
+    <h3>Melisa POC Result</h3>
+    <div id="viz"></div>
+    <details style="margin-top:12px;">
+      <summary style="cursor:pointer; font-size:0.85rem; color:#555;">Raw JSON</summary>
+      <pre class="json-block" id="json"></pre>
+    </details>
+  </div>
+</div>
+
+<script>
+const EMOTION_COLORS = {
+  joy: '#34c759', sadness: '#5ac8fa', anger: '#ff3b30', fear: '#ff9500',
+  surprise: '#af52de', disgust: '#a2845e', trust: '#0071e3', anticipation: '#ffcc00'
+};
+
+function emotionBars(scores) {
+  if (!scores) return '<p style="color:#888; font-size:0.85rem;">No scores</p>';
+  const entries = Object.entries(scores).sort((a,b) => b[1] - a[1]);
+  return entries.map(([e, s]) => {
+    const pct = Math.round(s * 100);
+    const color = EMOTION_COLORS[e] || '#999';
+    return `<div class="emotion-bar">
+      <span class="emotion-label">${e}</span>
+      <div class="emotion-track"><div class="emotion-fill" style="width:${pct}%; background:${color};"></div></div>
+      <span class="emotion-val">${pct}%</span>
+    </div>`;
+  }).join('');
+}
+
+async function runAnalysis() {
+  const btn = document.getElementById('analyzeBtn');
+  const loading = document.getElementById('loading');
+  const error = document.getElementById('error');
+  const result = document.getElementById('result');
+
+  btn.disabled = true;
+  loading.style.display = 'block';
+  error.style.display = 'none';
+  result.classList.remove('active');
+
+  const form = new FormData();
+  const text = document.getElementById('text').value;
+  const image = document.getElementById('image').files[0];
+  const video = document.getElementById('video').files[0];
+
+  if (text) form.append('text', text);
+  if (image) form.append('image', image);
+  if (video) form.append('video', video);
+
+  try {
+    const res = await fetch('/api/initial/analyze', { method: 'POST', body: form });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    const r = data.result;
+
+    let html = '';
+    html += `<p><strong>Label:</strong> ${r.initial_label} → <strong>Mapped:</strong> ${r.matched_emotion}</p>`;
+    html += `<p><strong>Score:</strong> ${r.initial_score?.toFixed?.(3) ?? 'N/A'} | <strong>Confidence:</strong> ${r.initial_confidence?.toFixed?.(3) ?? 'N/A'}</p>`;
+    html += emotionBars(r.emotion_distribution);
+    if (r.fusion?.explanation) {
+      html += `<p style="margin-top:12px; font-size:0.85rem; color:#555; font-style:italic;">${r.fusion.explanation}</p>`;
+    }
+    document.getElementById('viz').innerHTML = html;
+    document.getElementById('json').textContent = JSON.stringify(r, null, 2);
+    result.classList.add('active');
+  } catch (err) {
+    error.textContent = err.message;
+    error.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    loading.style.display = 'none';
+  }
+}
+</script>
+</body>
+</html>
