@@ -1,0 +1,29 @@
+# Hugging Face Space (CPU tier, mock PLM)
+gradio>=5.0
+requests>=2.31
+opencv-python-headless>=4.8
+numpy>=1.24
+
+# Real-model inference (default; requires GPU hardware tier):
+torch>=2.1
+torchvision>=0.16
+transformers>=4.45
+accelerate>=0.30
+qwen-vl-utils>=0.0.8
+
+# Note: ffmpeg is installed via packages.txt (apt), not pip.
+
+# Local Streamlit UI (streamlit_app.py)
+streamlit>=1.40
+
+# Melisa POC comparative pipeline (melisa_poc/, vendored from
+# ajayck007/myuni-sentiment-poc-melisa-v1)
+spaces>=0.30.0
+pydantic>=2.0.0,<3
+Pillow>=10.0.0
+pytesseract>=0.3.10
+faster-whisper>=1.0.0
+PyYAML>=6.0.0
+scenedetect[opencv]>=0.6.4,<0.7
+scipy>=1.10.0
+sentencepiece>=0.2.0
