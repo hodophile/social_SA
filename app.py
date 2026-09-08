@@ -13,6 +13,10 @@ from __future__ import annotations
 import os
 # Use CPU for Melisa POC to avoid ZeroGPU CUDA issues
 os.environ.setdefault("DEVICE", "cpu")
+# Hide GPU devices from PyTorch to avoid any GPU usage
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# Disable ZeroGPU GPU decorator to avoid GPU execution in local environment
+os.environ["SPACES_ZEROGPU"] = "0"
 
 # Import the bridge first to set up sys.path for melisa_poc imports
 from melisa_bridge import analyze_with_melisa              # Melisa POC
@@ -20,7 +24,15 @@ from melisa_bridge import analyze_with_melisa              # Melisa POC
 # Now we can import from melisa_poc to set the device for the visual analyzer
 import torch
 from melisa_poc.src.analyzers.visual import VisualSentimentAnalyzer
-# Force the Melisa visual analyzer to use CPU to avoid ZeroGPU CUDA conflicts
+
+# Force the Melisa visual analyzer to use CPU by patching __init__ to always use device='cpu'
+_original_init = VisualSentimentAnalyzer.__init__
+def _patched_init(self, *args, **kwargs):
+    kwargs['device'] = 'cpu'
+    return _original_init(self, *args, **kwargs)
+VisualSentimentAnalyzer.__init__ = _patched_init
+
+# Also set the class variable as a fallback (though the patch should be sufficient)
 VisualSentimentAnalyzer._gpu_device = torch.device('cpu')
 
 from pathlib import Path
