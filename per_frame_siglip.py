@@ -6,6 +6,7 @@ Output: list of {timestamp_seconds, emotion_scores} dicts.
 """
 from __future__ import annotations
 
+import sys
 import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -14,6 +15,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
+
+# melisa_poc internal modules import each other as `src.*`
+_MELISA_ROOT = Path(__file__).resolve().parent / "melisa_poc"
+if str(_MELISA_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MELISA_ROOT))
 
 warnings.filterwarnings("ignore", message=".*pretrained.*deprecated.*")
 warnings.filterwarnings("ignore", message=".*Arguments other than.*deprecated.*")
@@ -76,60 +82,53 @@ class SigLIPFrameAnalyzer:
         """Extract frames at sample_fps, classify each with SigLIP.
         Returns [{timestamp_seconds, emotions: {joy: 0.3, ...}}, ...]
         """
+        import tempfile
+        import shutil
         from melisa_poc.src.media.ffmpeg_utils import probe_video
-        from melisa_poc.src.media.samplers import build_frame_sampler
+        from melisa_poc.src.media.samplers import build_frame_sampler, VideoSamplingConfig
         from melisa_poc.src.analyzers.visual import VisualSentimentAnalyzer
 
         video_path = Path(video_path)
         probe = probe_video(video_path)
-        duration = probe.get("duration", 0.0)
+        duration = probe.duration_seconds
 
-        # Build frame sampler
-        from dataclasses import dataclass
-        @dataclass
-        class DummyConfig:
-            fps: float = sample_fps
-        sampler = build_frame_sampler("fixed_fps", sampling=DummyConfig(fps=sample_fps))
+        # Build frame sampler with the requested fps
+        sampling = VideoSamplingConfig(fps=sample_fps)
+        sampler = build_frame_sampler("fixed_fps", sampling=sampling)
 
-        frame_indices, timestamps = sampler.sample_indices(
-            total_frames=int(probe.get("nb_frames", 0)) or int(duration * 30),
-            fps=probe.get("fps", 30.0),
-            duration=duration,
-        )
+        # Extract frames to temp directory
+        tmpdir = tempfile.mkdtemp(prefix="siglip_frames_")
+        try:
+            sampled = sampler.sample(
+                media_path=video_path,
+                output_dir=tmpdir,
+                duration_seconds=duration,
+            )
 
-        # Cap frames
-        if len(frame_indices) > max_frames:
-            step = len(frame_indices) // max_frames
-            frame_indices = frame_indices[::step][:max_frames]
-            timestamps = timestamps[::step][:max_frames]
+            frames = sampled.frames
+            # Cap frames
+            if len(frames) > max_frames:
+                step = len(frames) // max_frames
+                frames = frames[::step][:max_frames]
 
-        results = []
-        for idx, ts in zip(frame_indices, timestamps):
-            try:
-                # Extract single frame via ffmpeg
-                import tempfile, subprocess, os
-                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-                    frame_path = f.name
-                cmd = [
-                    "ffmpeg", "-y", "-i", str(video_path),
-                    "-vf", f"select=eq(n\\,{idx})",
-                    "-vframes", "1", frame_path
-                ]
-                subprocess.run(cmd, capture_output=True, check=True)
-                pil_img = VisualSentimentAnalyzer.load_image(frame_path)
-                emotions = self._classify_frame(pil_img)
-                results.append({
-                    "timestamp_seconds": round(ts, 2),
-                    "emotions": emotions,
-                })
-                os.remove(frame_path)
-            except Exception as exc:
-                results.append({
-                    "timestamp_seconds": round(ts, 2),
-                    "emotions": None,
-                    "error": str(exc),
-                })
-        return results
+            results = []
+            for frame_info in frames:
+                try:
+                    pil_img = VisualSentimentAnalyzer.load_image(frame_info.path)
+                    emotions = self._classify_frame(pil_img)
+                    results.append({
+                        "timestamp_seconds": round(frame_info.timestamp_seconds, 2),
+                        "emotions": emotions,
+                    })
+                except Exception as exc:
+                    results.append({
+                        "timestamp_seconds": round(frame_info.timestamp_seconds, 2),
+                        "emotions": None,
+                        "error": str(exc),
+                    })
+            return results
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def analyze_image(self, image_path: Path) -> List[Dict]:
         """Treat single image as a 1-frame video at t=0."""
