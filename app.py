@@ -11,6 +11,9 @@ emotion_analysis).
 from __future__ import annotations
 
 import os
+# Use CPU for Melisa POC to avoid ZeroGPU CUDA issues
+os.environ.setdefault("DEVICE", "cpu")
+
 from pathlib import Path
 
 import gradio as gr
