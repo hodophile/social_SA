@@ -1,48 +1,36 @@
 """
-app.py – Gradio UI for side‑by‑side comparison:
-    * Original Melisa POC (melisa_poc/)
-    * New Temporal‑aware 8‑emotion pipeline (melisa_temporal_emotion/)
-Both return JSON in the format expected by the Qwen+OpenRouter setup.
+app.py – Gradio UI for side-by-side comparison:
+    * Initial Version  – original Melisa POC (melisa_poc/, late fusion)
+    * Current Version  – new Temporal-aware 8-emotion pipeline
+      (melisa_temporal_emotion/)
+
+Both outputs are shown in the JSON format used by the Qwen2.5-VLM-3B
+setup (execution_time_seconds / understanding / risk / action /
+emotion_analysis).
 """
 from __future__ import annotations
 
 import os
-import json
 from pathlib import Path
 
 import gradio as gr
 
 # ----------------------------------------------------------------------
-# Import the two pipelines
+# Pipelines
 # ----------------------------------------------------------------------
-import sys
-sys.path.append(str(Path(__file__).parent / "melisa_poc"))
-from src.pipeline import MyUniSentimentPipeline   # original Melisa
+from melisa_bridge import analyze_with_melisa              # Melisa POC
+from melisa_temporal_emotion.pipeline import (             # new pipeline
+    TemporalEmotionPipeline,
+)
 
-from melisa_temporal_emotion.pipeline import TemporalEmotionPipeline   # new
-
-# ----------------------------------------------------------------------
-# Configuration – defaults (can be overridden via Space secrets / env vars)
-# ----------------------------------------------------------------------
-MOCK = os.environ.get("PLM_MOCK", "0") == "1"          # 0 = real model, 1 = mock (not used by Melisa pipeline)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
-QWEN_MODEL = os.environ.get("QWEN_MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")  # kept for compatibility but not used
+
 
 # ----------------------------------------------------------------------
-# Lazy‑loaded pipeline singletons
+# Lazy singleton for the temporal pipeline
 # ----------------------------------------------------------------------
-_melisa_pipeline: Optional[MyUniSentimentPipeline] = None
-_temporal_pipeline: Optional[TemporalEmotionPipeline] = None
-
-
-def get_melisa_pipeline() -> MyUniSentimentPipeline:
-    global _melisa_pipeline
-    if _melisa_pipeline is None:
-        _melisa_pipeline = MyUniSentimentPipeline(
-            # No model_path or mock arguments; MyUniSentimentPipeline uses defaults.
-        )
-    return _melisa_pipeline
+_temporal_pipeline: TemporalEmotionPipeline | None = None
 
 
 def get_temporal_pipeline() -> TemporalEmotionPipeline:
@@ -56,102 +44,98 @@ def get_temporal_pipeline() -> TemporalEmotionPipeline:
 
 
 # ----------------------------------------------------------------------
-# Core analyse function – runs both pipelines and returns a tuple
+# Main entry: run both pipelines and compare
 # ----------------------------------------------------------------------
 def analyze(text: str, image: str, video: str, sample_fps: float):
     if not text and not image and not video:
         err = {"error": "Provide at least one of: text, image, video."}
-        return err, err, err, {}   # four outputs: melisa, temporal, understanding, comparison
+        return err, err, {}
 
-    post = {
-        "text": text or None,
-        "image_path": Path(image) if image else None,
-        "video_path": Path(video) if video else None,
-    }
+    # Melisa routes a single input (text XOR media) -> media wins.
+    media_path = None
+    if video:
+        media_path = str(video)
+    elif image:
+        media_path = str(image)
 
-    # ------------------------------------------------------------------
-    # Run Melisa POC
-    # ------------------------------------------------------------------
-    melisa_res = get_melisa_pipeline().analyze(
-        text=post["text"],
-        image_path=post["image_path"],
-        video_path=post["video_path"],
-        sample_fps=sample_fps,
+    # ---------------- Initial Version (Melisa POC) ----------------
+    melisa_res = analyze_with_melisa(
+        text=None if media_path else (text or None),
+        media_path=media_path,
     )
 
-    # ------------------------------------------------------------------
-    # Run Temporal Emotion pipeline
-    # ------------------------------------------------------------------
+    # ---------------- Current Version (Temporal Emotion) ----------
     temporal_res = get_temporal_pipeline().analyze(
-        text=post["text"],
-        image_path=post["image_path"],
-        video_path=post["video_path"],
+        text=text or None,
+        image_path=Path(image) if image else None,
+        video_path=Path(video) if video else None,
         sample_fps=sample_fps,
     )
 
-    # ------------------------------------------------------------------
-    # Build comparison summary
-    # ------------------------------------------------------------------
+    # ---------------- Comparison summary -------------------------
+    temporal_emo = temporal_res.get("emotion_analysis", {})
+
     comparison = {
-        "melisa": {
-            "primary_emotion": melisa_res.get("emotion_analysis", {}).get("primary_emotion"),
-            "primary_emotion_score": melisa_res.get("emotion_analysis", {}).get("primary_emotion_score"),
-            "valence": melisa_res.get("emotion_analysis", {}).get("valence"),
-            "confidence": melisa_res.get("emotion_analysis", {}).get("confidence"),
+        "initial_version": {
+            "matched_emotion": melisa_res.get("matched_emotion"),
+            "initial_label": melisa_res.get("initial_label"),
+            "valence": melisa_res.get("valence"),
+            "confidence": melisa_res.get("initial_confidence"),
         },
-        "temporal": {
-            "primary_emotion": temporal_res.get("emotion_analysis", {}).get("primary_emotion"),
-            "primary_emotion_score": temporal_res.get("emotion_analysis", {}).get("primary_emotion_score"),
-            "valence": temporal_res.get("emotion_analysis", {}).get("valence"),
-            "confidence": temporal_res.get("emotion_analysis", {}).get("confidence"),
+        "current_version": {
+            "primary_emotion": temporal_emo.get("primary_emotion"),
+            "primary_emotion_score": temporal_emo.get(
+                "primary_emotion_score"
+            ),
+            "valence": temporal_emo.get("valence"),
+            "confidence": temporal_emo.get("confidence"),
         },
     }
 
-    # Determine if the primary emotions match
-    melisa_primary = comparison["melisa"]["primary_emotion"]
-    temporal_primary = comparison["temporal"]["primary_emotion"]
-    if melisa_primary and temporal_primary:
-        comparison["emotions_match"] = melisa_primary == temporal_primary
+    v1_emo = comparison["initial_version"]["matched_emotion"]
+    v2_emo = comparison["current_version"]["primary_emotion"]
 
-        melisa_val = comparison["melisa"]["valence"]
-        temporal_val = comparison["temporal"]["valence"]
-        if melisa_val is not None and temporal_val is not None:
-            comparison["valence_gap"] = round(abs(melisa_val - temporal_val), 3)
+    if v1_emo and v2_emo:
+        comparison["emotions_match"] = v1_emo == v2_emo
 
-    # ------------------------------------------------------------------
-    # Return four values matching the Gradio outputs:
-    #   melisa JSON, temporal JSON, understanding (we reuse melisa's understanding as a proxy),
-    #   comparison summary
-    # ------------------------------------------------------------------
-    # For the "understanding" column we simply show the Melisa understanding –
-    # it already contains content, tone, intent, visual/audio description, etc.
-    # You could also show the temporal pipeline's understanding if you prefer.
-    return melisa_res, temporal_res, melisa_res.get("understanding", {}), comparison
+        v1_val = comparison["initial_version"]["valence"]
+        v2_val = comparison["current_version"]["valence"]
+        if v1_val is not None and v2_val is not None:
+            comparison["valence_gap"] = round(abs(v1_val - v2_val), 3)
+
+    return melisa_res, temporal_res, comparison
 
 
 # ----------------------------------------------------------------------
-# Gradio UI
+# UI text
 # ----------------------------------------------------------------------
 DESCRIPTION = (
-    "Side‑by‑side comparison of two sentiment pipelines that both return "
-    "the Qwen + OpenRouter JSON format.\\n\\n"
-    "**Left – Melisa POC** (the original vendored pipeline):\\n"
-    " • Frame‑level SigLIP visual sentiment → confidence‑weighted average (no temporal model)\\n"
-    " • Whisper → RoBERTa text sentiment for audio transcript\\n"
-    " • Caption → RoBERTa sentiment\\n"
-    " • Late fusion of the three modalities → 3‑class label (positive/neutral/negative) mapped to our emotion set.\\n\\n"
-    "**Right – Temporal Emotion** (new pipeline):\\n"
-    " • Per‑frame 8‑emotion CNN (ResNet‑18 → FER2013) → exponential‑decay temporal weighting\\n"
-    " • Audio transcript → OpenRouter emotion analysis (or RoBERTa fallback)\\n"
-    " • Caption → heuristic mapping of RoBERTa sentiment to 8 emotions\\n"
-    " • Same confidence‑weighted late fusion (`fuse_modalities`) → 8‑emotion distribution, valence, confidence.\\n"
+    "Side-by-side comparison of two sentiment/emotion pipelines.\n\n"
+
+    "**Initial Version — Melisa POC** (per-modality models + late fusion):\n"
+    "- Frames scored independently (SigLIP zero-shot), then averaged — "
+    "**no temporal model**\n"
+    "- Audio: Whisper ASR -> RoBERTa sentiment on the transcript\n"
+    "- Caption: RoBERTa sentiment\n"
+    "- Confidence-weighted late fusion -> positive / neutral / negative, "
+    "mapped onto the emotion labels (positive->joy, neutral->trust, "
+    "negative->sadness)\n\n"
+
+    "**Current Version — Temporal Emotion** (new):\n"
+    "- Per-frame 8-emotion CNN (ResNet-18 / FER2013 -> Plutchik's 8)\n"
+    "- **Temporal aggregation**: exponential-decay weighting over the frame "
+    "sequence, so order and transitions matter\n"
+    "- Audio transcript -> OpenRouter 8-emotion analysis (RoBERTa fallback)\n"
+    "- Same confidence-weighted late fusion, but fusing full 8-emotion "
+    "distributions instead of bare positive/negative scores\n"
 )
 
 with gr.Blocks(
-    title="Melisa POC vs Temporal Emotion (side‑by‑side)",
+    title="Initial Version (Melisa) vs Current Version (Temporal Emotion)",
     theme=gr.themes.Soft(primary_hue="indigo"),
 ) as demo:
-    gr.Markdown("# Social Media Post Analysis – Side‑by‑Side Comparison")
+
+    gr.Markdown("# Social Media Post Analysis — Comparative Deployment")
     gr.Markdown(DESCRIPTION)
 
     with gr.Row():
@@ -163,18 +147,20 @@ with gr.Blocks(
             label="Video frame sampling (fps)",
         )
 
-    analyze_btn = gr.Button("Analyze with both pipelines", variant="primary")
+    analyze_btn = gr.Button("Analyze with both", variant="primary")
 
     gr.Markdown("## Comparison")
-    comparison_out = gr.JSON(label="Side‑by‑side summary")
+    comparison_out = gr.JSON(label="Side-by-side summary")
 
     with gr.Row():
         with gr.Column():
-            gr.Markdown("### Melisa POC (original)")
-            melisa_out = gr.JSON(label="Melisa result")
+            gr.Markdown("### Initial Version (Melisa POC, late fusion)")
+            melisa_out = gr.JSON(
+                label="Initial Version sentiment (labels matched to emotions)"
+            )
         with gr.Column():
-            gr.Markdown("### Temporal Emotion (new)")
-            temporal_out = gr.JSON(label="Temporal Emotion result")
+            gr.Markdown("### Current Version (Temporal Emotion)")
+            temporal_out = gr.JSON(label="Current Version result")
 
     analyze_btn.click(
         fn=analyze,
@@ -185,8 +171,6 @@ with gr.Blocks(
     gr.Examples(
         examples=[
             ["I am so excited about this new project!", None, None, 1.0],
-            ["Check out this clip!", None, "examples/assets/sample_video.mp4", 1.0],
-            [None, "examples/assets/sample_image.png", None, 1.0],
         ],
         inputs=[text_in, image_in, video_in, fps_in],
         outputs=[melisa_out, temporal_out, comparison_out],

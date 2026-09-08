@@ -1,85 +1,65 @@
 """
-Orchestrator that builds the three modalities (caption, video, audio),
-runs the existing Melisa confidence‑weighted late fusion, and returns a
-JSON blob that matches the format used by the current Qwen + OpenRouter
-pipeline (execution_time_seconds, understanding, risk, action,
-emotion_analysis).
+TemporalEmotionPipeline — Melisa-based pipeline with temporal 8-emotion output.
+
+Modality flow:
+  caption  -> RoBERTa sentiment  -> mapped to 8 emotions (heuristic)
+  video    -> per-frame 8-emotion CNN -> temporal weighted average
+  audio    -> Whisper transcript    -> OpenRouter 8-emotion (or RoBERTa fallback)
+
+The three 8-emotion distributions are fused with the same
+confidence-weighted pattern Melisa uses for its late fusion, yielding a
+single 8-emotion distribution, valence and confidence.
+
+Output format matches the Qwen2.5-VLM-3B pipeline JSON:
+  execution_time_seconds / post_id / understanding / risk / action /
+  emotion_analysis
 """
+
 from __future__ import annotations
 
-from dataclasses import field
-import time
 import json
+import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
-from pydantic.dataclasses import dataclass
+from typing import Dict, Optional, Union
 
 import requests
 
-from melisa_poc.src.schemas import (
-    SentimentEvidence,
-    SpeechAnalysisResult,
-    VideoDiagnostics,
-    # SocialMediaPost,
-)
+# melisa_poc internal modules import each other as `src.*`, so we must
+# expose the melisa_poc directory itself on sys.path.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_MELISA_ROOT = _REPO_ROOT / "melisa_poc"
+for _p in (str(_REPO_ROOT), str(_MELISA_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 from melisa_poc.src.analyzers.text import TextSentimentAnalyzer
-from melisa_poc.src.analyzers.image import ImageAnalyzer
 from melisa_poc.src.analyzers.audio import AudioAnalyzer
-from melisa_poc.src.fusion import fuse_modalities, DEFAULT_FUSION
-from melisa_temporal_emotion.video_analyzer import VideoAnalyzer
+from melisa_temporal_emotion.video_analyzer import (
+    VideoAnalyzer,
+    VideoAnalysisBundle,
+)
 from melisa_temporal_emotion.text_analyzer import caption_to_emotion
-from melisa_temporal_emotion.models import EmotionNet
+from melisa_temporal_emotion.fusion import (
+    EMOTION_LABELS,
+    fuse_emotion_distributions,
+    temporal_weighted_average,
+    valence_of,
+)
 
-@dataclass
-class VideoAnalysisBundle:
-    """Pre-activity multimodal evidence for one video (pipeline wraps into ActivityAnalysisResult)."""
 
-    visual: Optional[SentimentEvidence]
-    ocr: Optional[SentimentEvidence]
-    ocr_text: Optional[str]
-    speech: Optional[SentimentEvidence]
-    transcript: Optional[str]
-    speech_result: Optional[SpeechAnalysisResult]
-    diagnostics: VideoDiagnostics
-    warnings: list[str] = field(default_factory=list)
-    overall: Optional[SentimentEvidence] = None
+PathLike = Union[str, Path]
+
 
 @dataclass
 class SocialMediaPost:
-    """
-    Raw social-media post.
-
-    A post may contain text, an image, a video, or any
-    combination of these.
-    """
+    """Minimal input record (melisa_poc has no such schema)."""
 
     post_id: str
     text: Optional[str] = None
     image_path: Optional[Path] = None
     video_path: Optional[Path] = None
-
-PathLike = Union[str, Path]
-EMOTION_LABELS = [
-    "joy",
-    "sadness",
-    "anger",
-    "fear",
-    "surprise",
-    "disgust",
-    "trust",
-    "anticipation",
-]
-
-VALENCE_MAP = {
-    "joy": +1.0,
-    "trust": +0.5,
-    "anticipation": +0.3,
-    "surprise": 0.0,
-    "fear": -0.5,
-    "anger": -0.8,
-    "sadness": -1.0,
-    "disgust": -0.8,
-}
 
 
 class TemporalEmotionPipeline:
@@ -92,62 +72,57 @@ class TemporalEmotionPipeline:
         openrouter_api_key: Optional[str] = None,
         openrouter_model: str = "openai/gpt-4o-mini",
     ):
-        self._video = video_analyzer or VideoAnalyzer()
-        self._audio = audio_analyzer or AudioAnalyzer(
-            ffmpeg_path=None,
-            language="en",
-            compute_type="int8",
-            model="base.en",
-        )
         self._text = text_analyzer or TextSentimentAnalyzer()
+        self._audio = audio_analyzer or AudioAnalyzer(
+            whisper_model="base.en",
+            compute_type="int8",
+            language="en",
+            text_analyzer=self._text,
+        )
+        self._video = video_analyzer or VideoAnalyzer(
+            audio_analyzer=self._audio,
+            text_analyzer=self._text,
+        )
         self._openrouter_key = openrouter_api_key
         self._openrouter_model = openrouter_model
 
     # ------------------------------------------------------------------
-    # Helper: OpenRouter emotion analysis (same as in app.py)
+    # OpenRouter emotion analysis over a text (e.g. audio transcript)
     # ------------------------------------------------------------------
     def _openrouter_emotion(self, text: str) -> dict:
         if not self._openrouter_key:
             return {"skipped": True, "reason": "no OPENROUTER_API_KEY"}
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self._openrouter_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": self._openrouter_model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": self._make_prompt(text),
-                }
-            ],
-            "temperature": 0,
-        }
-        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        r = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self._openrouter_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self._openrouter_model,
+                "messages": [{"role": "user", "content": self._make_prompt(text)}],
+                "temperature": 0,
+            },
+            timeout=60,
+        )
         r.raise_for_status()
         raw = r.json()["choices"][0]["message"]["content"]
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        data = json.loads(raw[start:end])
-        return {
-            "primary_emotion": data.get("primary_emotion"),
-            "secondary_emotion": data.get("secondary_emotion"),
-            "emotion_scores": data.get("emotion_scores", {}),
-            "valence": data.get("valence", 0.0),
-            "confidence": data.get("confidence", 0.5),
-            "rationale": data.get("rationale", ""),
-        }
+        start, end = raw.find("{"), raw.rfind("}") + 1
+        return json.loads(raw[start:end])
 
-    def _make_prompt(self, text: str) -> str:
+    @staticmethod
+    def _make_prompt(text: str) -> str:
         return (
             "Based ONLY on the following text, identify the emotion conveyed. "
-            "Score each of these emotions from 0.0 to 1.0: joy, sadness, anger, fear, surprise, disgust, trust, anticipation. "
-            "Return ONLY JSON:\n"
+            "Score each of these emotions from 0.0 to 1.0: "
+            + ", ".join(EMOTION_LABELS)
+            + ". Return ONLY JSON:\n"
             "{\n"
             '  "primary_emotion": "<one of the eight>",\n'
             '  "secondary_emotion": "<one of the eight or null>",\n'
-            '  "emotion_scores": {"joy":0.0,"sadness":0.0,"anger":0.0,"fear":0.0,"surprise":0.0,"disgust":0.0,"trust":0.0,"anticipation":0.0},\n'
+            '  "emotion_scores": {'
+            + ", ".join(f'"{e}": 0.0' for e in EMOTION_LABELS)
+            + "},\n"
             '  "valence": <-1.0 to +1.0>,\n'
             '  "confidence": 0.0-1.0,\n'
             '  "rationale": "one short sentence"\n'
@@ -156,7 +131,49 @@ class TemporalEmotionPipeline:
         )
 
     # ------------------------------------------------------------------
-    # Main analyse method – matches the signature used by the Gradio/Streamlit front‑end
+    # Modality branches -> (8-emotion distribution, confidence)
+    # ------------------------------------------------------------------
+
+    def _caption_branch(self, text: Optional[str]):
+        if not text:
+            return None
+        cap = self._text.analyze(text)
+        dist = caption_to_emotion(cap)
+        return dist, float(cap.confidence)
+
+    def _video_branch(self, video_path: Path):
+        bundle: VideoAnalysisBundle = self._video.analyze(video_path)
+        frame_emotions = bundle.frame_emotions or []
+        if not frame_emotions:
+            return None, bundle
+        fps = getattr(bundle.diagnostics, "sampling_fps", None) or 1.0
+        dist = temporal_weighted_average(
+            frame_emotions, half_life_seconds=2.0, fps=fps
+        )
+        return (dist, 1.0), bundle
+
+    def _audio_branch(self, video_path: Path):
+        speech = self._audio.analyze(video_path)
+        transcript = speech.transcript
+        if not transcript:
+            return None
+
+        if self._openrouter_key:
+            try:
+                emo = self._openrouter_emotion(transcript)
+                dist = {
+                    e: float(emo.get("emotion_scores", {}).get(e, 0.0))
+                    for e in EMOTION_LABELS
+                }
+                return dist, float(emo.get("confidence", 0.5))
+            except Exception:
+                pass  # fall through to RoBERTa
+
+        txt_sent = self._text.analyze(transcript)
+        return caption_to_emotion(txt_sent), float(txt_sent.confidence)
+
+    # ------------------------------------------------------------------
+    # Main entry — mirrors the Qwen pipeline's output format
     # ------------------------------------------------------------------
     def analyze(
         self,
@@ -168,172 +185,95 @@ class TemporalEmotionPipeline:
         t0 = time.perf_counter()
 
         post = SocialMediaPost(
-            post_id="temp-post",
+            post_id="temporal-post",
             text=text,
             image_path=Path(image_path) if image_path else None,
             video_path=Path(video_path) if video_path else None,
         )
 
-        # ------------------------------------------------------------------
-        # 1️⃣ Caption → 8‑emotion distribution (heuristic mapping)
-        # ------------------------------------------------------------------
-        caption_emotion = {}
+        warnings = []
+        video_bundle = None
+        transcript = None
+        frames_processed = 0
+
+        # caption
+        caption = None
         if post.text:
-            cap_sent = self._text.analyze(post.text)
-            caption_emotion = caption_to_emotion(cap_sent)
-        # Build a SentimentEvidence for the fusion step
-        caption_evidence = SentimentEvidence(
-            label="placeholder",
-            score=0.0,
-            confidence=1.0,
-            probabilities=caption_emotion,
-            model="caption_emotion_heuristic",
-            details={},
-        )
+            try:
+                caption = self._caption_branch(post.text)
+            except Exception as exc:
+                warnings.append(f"caption analysis failed: {exc}")
 
-        # ------------------------------------------------------------------
-        # 2️⃣ Video → per‑frame 8‑emotion → temporal aggregation
-        # ------------------------------------------------------------------
-        video_evidence = SentimentEvidence(
-            label="placeholder",
-            score=0.0,
-            confidence=1.0,
-            probabilities={e: 0.0 for e in EMOTION_LABELS},
-            model="video_temporal_emotion",
-            details={},
-        )
+        # video + audio
+        video_mod = None
         if post.video_path:
-            video_bundle: VideoAnalysisBundle = self._video.analyze(
-                post.video_path,
-                caption_sentiment=caption_evidence,
-            )
-            frame_emotions = getattr(video_bundle, "frame_emotions", [])
-            if frame_emotions:
-                video_dist = temporal_weighted_average(
-                    frame_emotions,
-                    half_life_seconds=2.0,
-                    fps=getattr(video_bundle.diagnostics, "sampling_fps", 1.0),
-                )
-                video_evidence = SentimentEvidence(
-                    label="placeholder",
-                    score=0.0,
-                    confidence=1.0,
-                    probabilities=video_dist,
-                    model="video_temporal_emotion",
-                    details={},
-                )
+            try:
+                video_mod, video_bundle = self._video_branch(post.video_path)
+                frames_processed = video_bundle.diagnostics.frames_extracted
+                transcript = video_bundle.transcript
+                warnings.extend(video_bundle.warnings)
+            except Exception as exc:
+                warnings.append(f"video analysis failed: {exc}")
 
-        # ------------------------------------------------------------------
-        # 3️⃣ Audio transcript → 8‑emotion via OpenRouter (fallback to RoBERTa)
-        # ------------------------------------------------------------------
-        audio_evidence = SentimentEvidence(
-            label="placeholder",
-            score=0.0,
-            confidence=1.0,
-            probabilities={e: 0.0 for e in EMOTION_LABELS},
-            model="audio_emotion",
-            details={},
-        )
+        audio_mod = None
         if post.video_path:
-            speech_result = self._audio.analyze(post.video_path)
-            if speech_result.transcript and self._openrouter_key:
-                emo = self._openrouter_emotion(speech_result.transcript)
-                if not emo.get("skipped"):
-                    audio_evidence = SentimentEvidence(
-                        label="placeholder",
-                        score=0.0,
-                        confidence=emo["confidence"],
-                        probabilities=emo["emotion_scores"],
-                        model="openrouter_emotion",
-                        details={"valence": emo["valence"], "rationale": emo["rationale"]},
-                    )
-            # fallback to RoBERTa if no API key or error
-            elif speech_result.transcript and self._text is not None:
-                txt_sent = self._text.analyze(speech_result.transcript)
-                audio_evidence = SentimentEvidence(
-                    label="placeholder",
-                    score=0.0,
-                    confidence=txt_sent.confidence,
-                    probabilities=caption_to_emotion(txt_sent),   # reuse heuristic
-                    model="audio_emotion_roberta",
-                    details={},
-                )
+            try:
+                audio_mod = self._audio_branch(post.video_path)
+            except Exception as exc:
+                warnings.append(f"audio analysis failed: {exc}")
 
-        # ------------------------------------------------------------------
-        # 4️⃣ Final fusion (confidence‑weighted late fusion – exactly Melisa’s)
-        # ------------------------------------------------------------------
-        fused = fuse_modalities(
-            {
-                "text":   caption_evidence,
-                "visual": video_evidence,
-                "speech": audio_evidence,
-            },
-            config=DEFAULT_FUSION,
+        # fusion of 8-emotion distributions
+        fused_dist, fused_confidence = fuse_emotion_distributions(
+            {"text": caption, "visual": video_mod, "speech": audio_mod}
         )
-        overall = fused.overall   # SentimentEvidence with .probabilities = 8‑emotion dist
 
-        exec_time = round(time.perf_counter() - t0, 3)
+        primary = max(fused_dist, key=fused_dist.get)
+        ranked = sorted(fused_dist.items(), key=lambda kv: kv[1], reverse=True)
+        secondary = ranked[1][0] if len(ranked) > 1 else None
+        valence = valence_of(fused_dist)
+        primary_score = round(fused_dist[primary] * fused_confidence, 3)
 
-        # ------------------------------------------------------------------
-        # Build the final JSON in the exact format used by the Qwen setup
-        # ------------------------------------------------------------------
+        emotion_analysis = {
+            "emotion_model": "temporal_emotion_net + caption_heuristic + openrouter",
+            "primary_emotion": primary,
+            "secondary_emotion": secondary,
+            "emotion_scores": {k: round(v, 3) for k, v in fused_dist.items()},
+            "emotion_distribution": {k: round(v, 3) for k, v in fused_dist.items()},
+            "valence": valence,
+            "confidence": round(fused_confidence, 3),
+            "primary_emotion_score": primary_score,
+            "rationale": (
+                "Temporal-weighted per-frame emotion net fused with caption "
+                "and audio-transcript emotion (confidence-weighted late fusion)."
+            ),
+        }
+
         understanding = {
-            "content": post.text or "No caption provided.",
-            "tone": "neutral",                     # placeholder – could be derived from valence
-            "intent": "informational",             # placeholder
+            "content": post.text or (transcript or "No caption provided."),
+            "tone": primary,
+            "intent": "informational",
             "entities": [],
             "visual_description": (
-                f"{len(getattr(video_bundle, 'frame_paths', []))} video frames processed"
-                if post.video_path else "No video"
+                f"{frames_processed} video frames processed"
+                if post.video_path
+                else "No video"
             ),
             "audio_description": (
-                "Audio present and transcribed"
-                if post.video_path and getattr(self._audio, "_whisper_model", None)
+                "Audio transcribed: " + (transcript[:200] if transcript else "none")
+                if post.video_path
                 else "No audio"
             ),
             "potential_harm": [],
         }
 
-        # ---- risk (same as before – we keep the harmless default) ----
-        risk = {
-            "score": 0.0,
-            "labels": [],
-            "probabilities": {},
-        }
-
-        # ---- action – harmless by default (you can plug in your own thresholds) ----
-        action = "ALLOW"
-
-        # ---- emotion analysis block (matches the Qwen+OpenRouter output) ----
-        # Extract the fused 8‑emotion distribution from overall.probabilities
-        emo_dist = overall.probabilities or {e: 0.0 for e in EMOTION_LABELS}
-        # Find primary emotion (highest probability)
-        primary = max(emo_dist.items(), key=lambda kv: kv[1])[0] if emo_dist else "joy"
-        # Valence: we approximate it as the weighted sum of emotion → valence mapping
-        valence = sum(emo_dist[e] * VALENCE_MAP[e] for e in EMOTION_LABELS)
-        confidence = overall.confidence or 0.0
-        primary_score = emo_dist.get(primary, 0.0) * confidence
-
-        emotion_analysis = {
-            "emotion_model": "temporal_emotion_net + caption_heuristic + openrouter",
-            "primary_emotion": primary,
-            "secondary_emotion": None,   # we could compute second‑highest if desired
-            "emotion_scores": emo_dist,          # raw 0‑1 scores (not normalised)
-            "emotion_distribution": {k: round(v, 3) for k, v in emo_dist.items()},
-            "valence": round(valence, 3),
-            "confidence": confidence,
-            "primary_emotion_score": round(primary_score, 3),
-            "rationale": (
-                "Temporal‑weighted average of per‑frame emotion net output, "
-                "caption‑heuristic mapping, and audio transcript analysed via OpenRouter."
-            ),
-        }
-
-        return {
-            "execution_time_seconds": exec_time,
+        result = {
+            "execution_time_seconds": round(time.perf_counter() - t0, 3),
             "post_id": post.post_id,
             "understanding": understanding,
-            "risk": risk,
-            "action": action,
+            "risk": {"score": 0.0, "labels": [], "probabilities": {}},
+            "action": "ALLOW",
             "emotion_analysis": emotion_analysis,
         }
+        if warnings:
+            result["warnings"] = warnings
+        return result
