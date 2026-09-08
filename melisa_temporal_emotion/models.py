@@ -9,6 +9,7 @@ import torch
 import torchvision.transforms as T
 from torchvision.models import resnet18
 import numpy as np
+from PIL import Image
 from pathlib import Path
 
 # Mapping from FER2013 class order → our 8 Plutchik emotions
@@ -44,7 +45,9 @@ class EmotionNet:
         rgb_img – H×W×3 uint8 array (OpenCV format)
         Returns a dict {emotion: probability in [0,1]} for the 8 emotions.
         """
-        img = self.transform(rgb_img).unsqueeze(0).to(self.device)
+        # T.ToTensor() expects a PIL Image, not a raw numpy array
+        pil_img = Image.fromarray(rgb_img) if isinstance(rgb_img, np.ndarray) else rgb_img
+        img = self.transform(pil_img).unsqueeze(0).to(self.device)
         logits = self.model(img)
         probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
         # Build dict – add a small uniform mass for anticipation (class 7)
