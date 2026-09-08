@@ -1,11 +1,11 @@
 """
 app.py – Gradio UI for side-by-side comparison:
     * Initial Version  – Melisa POC (melisa_poc/, late fusion)
-    * Qwen Version     – Qwen2.5-VLM-3B multimodal pipeline
+    * Timestamp-LLM    – per-frame SigLIP + timestamps → OpenRouter GPT-4o-mini
 
-Both outputs are shown in the JSON format used by the Qwen2.5-VLM-3B
-setup (execution_time_seconds / understanding / risk / action /
-emotion_analysis).
+Both outputs are shown in the JSON format with execution_time_seconds,
+understanding, risk, action, emotion_analysis, plus frame_timestamps for
+the timestamp-LLM version.
 """
 from __future__ import annotations
 
@@ -23,7 +23,26 @@ import gradio as gr
 # Pipelines
 # ----------------------------------------------------------------------
 from melisa_bridge import analyze_with_melisa              # Melisa POC
-from qwen_bridge import analyze_with_qwen                  # Qwen2.5-VLM-3B
+from llm_fusion_pipeline import TimestampLLMFusionPipeline  # new
+
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+
+
+# ----------------------------------------------------------------------
+# Lazy singleton
+# ----------------------------------------------------------------------
+_llm_pipeline: TimestampLLMFusionPipeline | None = None
+
+
+def get_llm_pipeline() -> TimestampLLMFusionPipeline:
+    global _llm_pipeline
+    if _llm_pipeline is None:
+        _llm_pipeline = TimestampLLMFusionPipeline(
+            openrouter_api_key=OPENROUTER_API_KEY,
+            openrouter_model=OPENROUTER_MODEL,
+        )
+    return _llm_pipeline
 
 
 # ----------------------------------------------------------------------
@@ -47,17 +66,16 @@ def analyze(text: str, image: str, video: str, sample_fps: float):
         media_path=media_path,
     )
 
-    # ---------------- Qwen Version --------------------------------
-    qwen_res = analyze_with_qwen(
+    # ---------------- Timestamp-LLM Version -----------------------
+    llm_res = get_llm_pipeline().analyze(
         text=text or None,
-        image_path=image,
-        video_path=video,
+        image_path=Path(image) if image else None,
+        video_path=Path(video) if video else None,
         sample_fps=sample_fps,
-        mock=True,  # CPU-only Space; set False when GPU is available
     )
 
     # ---------------- Comparison summary -------------------------
-    qwen_emo = qwen_res.get("emotion_analysis", {})
+    llm_emo = llm_res.get("emotion_analysis", {})
 
     comparison = {
         "initial_version": {
@@ -66,28 +84,28 @@ def analyze(text: str, image: str, video: str, sample_fps: float):
             "valence": melisa_res.get("valence"),
             "confidence": melisa_res.get("initial_confidence"),
         },
-        "qwen_version": {
-            "primary_emotion": qwen_emo.get("primary_emotion"),
-            "primary_emotion_score": qwen_emo.get(
+        "timestamp_llm_version": {
+            "primary_emotion": llm_emo.get("primary_emotion"),
+            "primary_emotion_score": llm_emo.get(
                 "primary_emotion_score"
             ),
-            "valence": qwen_emo.get("valence"),
-            "confidence": qwen_emo.get("confidence"),
+            "valence": llm_emo.get("valence"),
+            "confidence": llm_emo.get("confidence"),
         },
     }
 
     v1_emo = comparison["initial_version"]["matched_emotion"]
-    v2_emo = comparison["qwen_version"]["primary_emotion"]
+    v2_emo = comparison["timestamp_llm_version"]["primary_emotion"]
 
     if v1_emo and v2_emo:
         comparison["emotions_match"] = v1_emo == v2_emo
 
         v1_val = comparison["initial_version"]["valence"]
-        v2_val = comparison["qwen_version"]["valence"]
+        v2_val = comparison["timestamp_llm_version"]["valence"]
         if v1_val is not None and v2_val is not None:
             comparison["valence_gap"] = round(abs(v1_val - v2_val), 3)
 
-    return melisa_res, qwen_res, comparison
+    return melisa_res, llm_res, comparison
 
 
 # ----------------------------------------------------------------------
@@ -105,20 +123,22 @@ DESCRIPTION = (
     "mapped onto the emotion labels (positive->joy, neutral->trust, "
     "negative->sadness)\n\n"
 
-    "**Qwen Version — Qwen2.5-VLM-3B** (multimodal LLM):\n"
-    "- Single unified model processes text + image + video together\n"
-    "- Generates structured JSON with content, tone, intent, harm assessment\n"
-    "- Tone mapped heuristically to 8 Plutchik emotions for comparison\n"
-    "- Currently running in **mock mode** (deterministic placeholders) "
-    "on CPU-only Space; switch to real model when GPU is available\n"
+    "**Timestamp-LLM Version** (per-frame + LLM synthesis):\n"
+    "- Video → extract frames at sample_fps with timestamps\n"
+    "- Each frame → SigLIP zero-shot 8-emotion classification\n"
+    "- Audio → Faster-Whisper → transcript\n"
+    "- **ALL context sent to OpenRouter GPT-4o-mini**: frame emotions + "
+    "timestamps + audio transcript + caption\n"
+    "- LLM synthesizes temporal dynamics and cross-modal agreement\n"
+    "- Returns full 8-emotion distribution with rationale\n"
 )
 
 with gr.Blocks(
-    title="Initial Version (Melisa) vs Qwen2.5-VLM-3B",
+    title="Initial Version (Melisa) vs Timestamp-LLM-Fusion",
     theme=gr.themes.Soft(primary_hue="indigo"),
 ) as demo:
 
-    gr.Markdown("# Social Media Post Analysis — Qwen vs Melisa Comparison")
+    gr.Markdown("# Social Media Post Analysis — Timestamp-LLM vs Melisa")
     gr.Markdown(DESCRIPTION)
 
     with gr.Row():
@@ -142,13 +162,13 @@ with gr.Blocks(
                 label="Initial Version sentiment (labels matched to emotions)"
             )
         with gr.Column():
-            gr.Markdown("### Qwen Version (Qwen2.5-VLM-3B)")
-            qwen_out = gr.JSON(label="Qwen Version result")
+            gr.Markdown("### Timestamp-LLM Version (SigLIP + OpenRouter)")
+            llm_out = gr.JSON(label="Timestamp-LLM result")
 
     analyze_btn.click(
         fn=analyze,
         inputs=[text_in, image_in, video_in, fps_in],
-        outputs=[melisa_out, qwen_out, comparison_out],
+        outputs=[melisa_out, llm_out, comparison_out],
     )
 
     gr.Examples(
@@ -156,7 +176,7 @@ with gr.Blocks(
             ["I am so excited about this new project!", None, None, 1.0],
         ],
         inputs=[text_in, image_in, video_in, fps_in],
-        outputs=[melisa_out, qwen_out, comparison_out],
+        outputs=[melisa_out, llm_out, comparison_out],
         fn=analyze,
         cache_examples=False,
     )
