@@ -11,6 +11,13 @@ emotion_analysis).
 from __future__ import annotations
 
 import os
+
+# ----------------------------------------------------------------------
+# CPU-only Space fix: neutralise spaces.GPU before Melisa loads it
+# ----------------------------------------------------------------------
+import spaces
+spaces.GPU = lambda **kwargs: lambda f: f  # no-op decorator
+
 from pathlib import Path
 
 import gradio as gr
