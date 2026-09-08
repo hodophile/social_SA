@@ -34,21 +34,33 @@ def _siglip_gpu_duration(input_items: dict[str, Any]) -> int:
 def _siglip_gpu_forward(input_items: dict[str, Any]) -> np.ndarray:
     """SigLIP 2 forward only. Returns CPU logits; never moves RoBERTa or Whisper.
 
-    Off ZeroGPU, ``spaces.GPU`` is a no-op so this runs in-process on the analyzer device.
+    Off ZeroGPU, spaces.GPU is a no-op so this runs in-process on the analyzer device.
     """
     model = VisualSentimentAnalyzer._gpu_model
-    device = VisualSentimentAnalyzer._gpu_device
-    if model is None or device is None:
+    if model is None:
         raise RuntimeError("SigLIP 2 model is not loaded")
+    # Determine the target device from the first tensor in input_items
+    target_device = None
+    for value in input_items.values():
+        if torch.is_tensor(value):
+            target_device = value.device
+            break
+    if target_device is None:
+        # No tensors, fallback to the model's device (should be set)
+        target_device = next(model.parameters()).device
+    # Move model to target device if needed
+    if next(model.parameters()).device != target_device:
+        model.to(target_device)
+        # Update the class variable's device to avoid moving again in future calls
+        VisualSentimentAnalyzer._gpu_device = target_device
+    # Prepare tensors on the target device
     tensors = {
-        key: value.to(device) if torch.is_tensor(value) else value
+        key: value.to(target_device) if torch.is_tensor(value) else value
         for key, value in input_items.items()
     }
     with torch.no_grad():
         outputs = model(**tensors)
         return outputs.logits_per_image.detach().float().cpu().numpy()
-
-
 class VisualSentimentAnalyzer:
     """Lazy SigLIP 2 zero-shot scorer against configurable sentiment concept prompts.
 
