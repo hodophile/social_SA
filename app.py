@@ -14,6 +14,15 @@ import os
 # Use CPU for Melisa POC to avoid ZeroGPU CUDA issues
 os.environ.setdefault("DEVICE", "cpu")
 
+# Import the bridge first to set up sys.path for melisa_poc imports
+from melisa_bridge import analyze_with_melisa              # Melisa POC
+
+# Now we can import from melisa_poc to set the device for the visual analyzer
+import torch
+from melisa_poc.src.analyzers.visual import VisualSentimentAnalyzer
+# Force the Melisa visual analyzer to use CPU to avoid ZeroGPU CUDA conflicts
+VisualSentimentAnalyzer._gpu_device = torch.device('cpu')
+
 from pathlib import Path
 
 import gradio as gr
@@ -21,7 +30,6 @@ import gradio as gr
 # ----------------------------------------------------------------------
 # Pipelines
 # ----------------------------------------------------------------------
-from melisa_bridge import analyze_with_melisa              # Melisa POC
 from melisa_temporal_emotion.pipeline import (             # new pipeline
     TemporalEmotionPipeline,
 )
