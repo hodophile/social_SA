@@ -25,8 +25,8 @@ import gradio as gr
 from melisa_bridge import analyze_with_melisa              # Melisa POC
 from llm_fusion_pipeline import TimestampLLMFusionPipeline  # new
 
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+KIMI_API_KEY = os.environ.get("KIMI_API_KEY")
+KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k2-5")
 
 
 # ----------------------------------------------------------------------
@@ -39,8 +39,8 @@ def get_llm_pipeline() -> TimestampLLMFusionPipeline:
     global _llm_pipeline
     if _llm_pipeline is None:
         _llm_pipeline = TimestampLLMFusionPipeline(
-            openrouter_api_key=OPENROUTER_API_KEY,
-            openrouter_model=OPENROUTER_MODEL,
+            kimi_api_key=KIMI_API_KEY,
+            kimi_model=KIMI_MODEL,
         )
     return _llm_pipeline
 
@@ -127,7 +127,7 @@ DESCRIPTION = (
     "- Video → extract frames at sample_fps with timestamps\n"
     "- Each frame → SigLIP zero-shot 8-emotion classification\n"
     "- Audio → Faster-Whisper → transcript\n"
-    "- **ALL context sent to OpenRouter GPT-4o-mini**: frame emotions + "
+    "- **ALL context sent to Kimi (Moonshot AI)**: frame emotions + "
     "timestamps + audio transcript + caption\n"
     "- LLM synthesizes temporal dynamics and cross-modal agreement\n"
     "- Returns full 8-emotion distribution with rationale\n"

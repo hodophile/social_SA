@@ -1,6 +1,6 @@
 """
 llm_fusion_pipeline.py — Send per-frame SigLIP emotions + timestamps +
-audio transcript + caption to OpenRouter GPT-4o-mini for final 8-emotion
+audio transcript + caption to Kimi (Moonshot AI) for final 8-emotion
 synthesis.
 
 This is the "timestamp-LLM-fusion" architecture:
@@ -9,7 +9,7 @@ This is the "timestamp-LLM-fusion" architecture:
     text → caption
          |
          v    all context in one prompt
-    OpenRouter GPT-4o-mini
+    Kimi K2.5 (Moonshot AI)
          |
          v    structured JSON
     8-emotion distribution + valence + confidence
@@ -33,8 +33,17 @@ if str(_MELISA_ROOT) not in sys.path:
 from per_frame_siglip import SigLIPFrameAnalyzer
 from melisa_poc.src.analyzers.audio import AudioAnalyzer
 
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+# ------------------------------------------------------------------
+# Kimi (Moonshot AI) API configuration
+# ------------------------------------------------------------------
+# Option 1: Set via environment variable (recommended for HF Spaces)
+KIMI_API_KEY = os.environ.get("KIMI_API_KEY")
+
+# Option 2: Hardcode placeholder (for local testing only — replace with real key)
+# KIMI_API_KEY = "sk-your-kimi-api-key-here"
+
+KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k2-5")
+KIMI_API_URL = "https://api.moonshot.cn/v1/chat/completions"
 
 EMOTION_LABELS = [
     "joy", "sadness", "anger", "fear",
@@ -55,8 +64,8 @@ class TimestampLLMFusionPipeline:
         self,
         siglip_analyzer: Optional[SigLIPFrameAnalyzer] = None,
         audio_analyzer: Optional[AudioAnalyzer] = None,
-        openrouter_api_key: Optional[str] = None,
-        openrouter_model: str = "openai/gpt-4o-mini",
+        kimi_api_key: Optional[str] = None,
+        kimi_model: str = "kimi-k2-5",
     ):
         self._siglip = siglip_analyzer or SigLIPFrameAnalyzer(device="cpu")
         self._audio = audio_analyzer or AudioAnalyzer(
@@ -64,8 +73,8 @@ class TimestampLLMFusionPipeline:
             compute_type="int8",
             language="en",
         )
-        self._api_key = openrouter_api_key or OPENROUTER_API_KEY
-        self._model = openrouter_model or OPENROUTER_MODEL
+        self._api_key = kimi_api_key or KIMI_API_KEY
+        self._model = kimi_model or KIMI_MODEL
 
     # ------------------------------------------------------------------
     # Build the prompt
@@ -131,14 +140,14 @@ class TimestampLLMFusionPipeline:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # Call OpenRouter
+    # Call Kimi (Moonshot AI)
     # ------------------------------------------------------------------
     def _call_llm(self, prompt: str) -> Dict[str, Any]:
         if not self._api_key:
-            raise RuntimeError("OPENROUTER_API_KEY not set")
+            raise RuntimeError("KIMI_API_KEY not set")
 
         r = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
+            KIMI_API_URL,
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
@@ -203,7 +212,7 @@ class TimestampLLMFusionPipeline:
                 prompt = self._build_prompt(frame_results, transcript, text)
                 llm_out = self._call_llm(prompt)
                 emotion_analysis = {
-                    "emotion_model": f"timestamp-llm-fusion ({self._model})",
+                    "emotion_model": f"timestamp-llm-fusion (Kimi {self._model})",
                     "primary_emotion": llm_out.get("primary_emotion"),
                     "secondary_emotion": llm_out.get("secondary_emotion"),
                     "emotion_scores": llm_out.get("emotion_scores", {}),
