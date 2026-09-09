@@ -47,6 +47,12 @@ from melisa_temporal_emotion.fusion import (
     temporal_weighted_average,
     valence_of,
 )
+from melisa_temporal_emotion.diarization import (
+    diarize_segments,
+    format_diarization_for_llm,
+    add_speakers_to_timeline,
+    DiarizationResult,
+)
 
 
 PathLike = Union[str, Path]
@@ -277,12 +283,16 @@ class TemporalEmotionPipeline:
     # 3. LLM FUSION (rich timeline prompt)
     # ==================================================================
 
-    def _llm_fusion(self, timeline: List[TimelineEvent]) -> dict:
-        """Send unified timeline to OpenRouter for emotion synthesis."""
+    def _llm_fusion(
+        self,
+        timeline: List[TimelineEvent],
+        diarization: Optional[DiarizationResult] = None,
+    ) -> dict:
+        """Send unified timeline + diarization to OpenRouter for emotion synthesis."""
         if not self._openrouter_key:
             raise RuntimeError("OPENROUTER_API_KEY not set")
 
-        prompt = self._build_timeline_prompt(timeline)
+        prompt = self._build_timeline_prompt(timeline, diarization=diarization)
 
         r = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
@@ -315,25 +325,42 @@ class TemporalEmotionPipeline:
             "rationale": parsed.get("rationale", ""),
         }
 
-    def _build_timeline_prompt(self, timeline: List[TimelineEvent]) -> str:
-        """Build a narrative prompt from the unified timeline."""
+    def _build_timeline_prompt(
+        self,
+        timeline: List[TimelineEvent],
+        diarization: Optional[DiarizationResult] = None,
+    ) -> str:
+        """Build a narrative prompt from the unified timeline + diarization."""
         lines = [
             "You are an expert multimodal emotion analyst. Analyze the following video content.",
             "",
-            "Below is a unified timeline of all extracted modalities (frames, OCR text, speech, caption).",
-            "Each event is tagged with its timestamp. Use temporal context, cross-modal agreement/disagreement,",
-            "and any visible text (OCR) to determine the TRUE overall emotion of the video.",
+            "Below is a unified timeline of all extracted modalities (frames, OCR text, speech with speaker labels, caption).",
+            "Each event is tagged with its timestamp and speaker (when applicable). Use temporal context, cross-modal agreement/disagreement,",
+            "speaker dynamics (who says what, tone shifts between speakers), and any visible text (OCR) to determine the TRUE overall emotion of the video.",
             "",
             "IMPORTANT: The per-frame emotion scores come from a vision model that may misread context.",
             "Your job is to CORRECT and SYNTHESIZE — not just average. Consider:",
             "  - Temporal dynamics (does emotion shift over time?)",
             "  - Cross-modal agreement (do visual, audio, and text agree?)",
+            "  - Speaker dynamics (different speakers may convey different emotions)",
             "  - Sarcasm or irony (text says 'love it' but visual shows anger)",
             "  - OCR text visible in frames (signs, captions, subtitles)",
             "",
+        ]
+
+        # Add diarization summary if available
+        if diarization and diarization.segments:
+            lines.append("--- SPEAKER DIARIZATION ---")
+            lines.append(f"Detected {diarization.num_speakers} speaker(s): {', '.join(diarization.speaker_labels)}")
+            lines.append("")
+            for seg in diarization.segments:
+                lines.append(f"[{seg.start:.1f}s-{seg.end:.1f}s] {seg.speaker}: \"{seg.text}\"")
+            lines.append("")
+
+        lines.extend([
             "--- UNIFIED TIMELINE ---",
             "",
-        ]
+        ])
 
         for ev in timeline:
             if ev.event_type == "frame":
@@ -344,7 +371,8 @@ class TemporalEmotionPipeline:
             elif ev.event_type == "ocr":
                 lines.append(f"[OCR] Visible text in frames: \"{ev.data['text']}\"")
             elif ev.event_type == "asr":
-                lines.append(f"[{ev.time_start:.1f}s-{ev.time_end:.1f}s] SPEECH → \"{ev.data['text']}\"")
+                speaker = ev.data.get("speaker", "UNKNOWN")
+                lines.append(f"[{ev.time_start:.1f}s-{ev.time_end:.1f}s] SPEECH ({speaker}) → \"{ev.data['text']}\"")
             elif ev.event_type == "caption":
                 lines.append(f"[CAPTION] Post text: \"{ev.data['text']}\"")
 
@@ -352,7 +380,7 @@ class TemporalEmotionPipeline:
             "",
             "--- TASK ---",
             "",
-            "Based on ALL evidence above, provide the overall emotion analysis.",
+            "Based on ALL evidence above (including speaker labels and diarization), provide the overall emotion analysis.",
             "Score each emotion from 0.0 to 1.0 (they need NOT sum to 1.0).",
             "",
             "Return ONLY valid JSON:",
@@ -367,7 +395,7 @@ class TemporalEmotionPipeline:
             "  },",
             '  "valence": <-1.0 to +1.0>,',
             '  "confidence": 0.0-1.0,',
-            '  "rationale": "Explain your reasoning in 1-2 sentences, citing specific timeline events."',
+            '  "rationale": "Explain your reasoning in 1-2 sentences, citing specific timeline events and speakers."',
             "}",
         ])
         return "\n".join(lines)
@@ -443,19 +471,28 @@ class TemporalEmotionPipeline:
             caption=post.text,
         )
 
-        # --- Fusion: LLM (timeline) or math fallback ---
+        # --- Speaker diarization ---
+        diarization = None
+        if asr_segments:
+            try:
+                diarization = diarize_segments(asr_segments)
+                timeline = add_speakers_to_timeline(timeline, diarization)
+            except Exception as exc:
+                warnings.append(f"diarization failed: {exc}")
+
+        # --- Fusion: LLM (timeline + diarization) or math fallback ---
         use_llm = bool(self._openrouter_key) and len(timeline) > 0
 
         if use_llm:
             try:
-                llm_result = self._llm_fusion(timeline)
+                llm_result = self._llm_fusion(timeline, diarization=diarization)
                 fused_dist = llm_result["emotion_scores"]
                 fused_confidence = llm_result["confidence"]
                 primary = llm_result["primary_emotion"]
                 secondary = llm_result["secondary_emotion"]
                 valence = llm_result["valence"]
                 rationale = llm_result["rationale"]
-                fusion_method = "openrouter_llm_timeline"
+                fusion_method = "openrouter_llm_timeline_diarization"
             except Exception as exc:
                 warnings.append(f"LLM fusion failed ({exc}); falling back to math fusion")
                 use_llm = False
@@ -498,6 +535,10 @@ class TemporalEmotionPipeline:
         visual_desc = f"{frames_processed} video frames processed" if post.video_path else ("1 image processed" if post.image_path else "No visual")
         audio_desc = f"Audio transcribed: {(transcript[:200] if transcript else 'none')}" if post.video_path else "No audio"
 
+        # Add diarization to understanding
+        if diarization and diarization.segments:
+            audio_desc += f" | Speakers: {', '.join(diarization.speaker_labels)}"
+
         understanding = {
             "content": post.text or (transcript or "No caption provided."),
             "tone": primary,
@@ -525,6 +566,23 @@ class TemporalEmotionPipeline:
                 for e in timeline
             ],
         }
+
+        # Add diarization result if available
+        if diarization and diarization.segments:
+            result["diarization"] = {
+                "num_speakers": diarization.num_speakers,
+                "speaker_labels": diarization.speaker_labels,
+                "segments": [
+                    {
+                        "start": s.start,
+                        "end": s.end,
+                        "text": s.text,
+                        "speaker": s.speaker,
+                    }
+                    for s in diarization.segments
+                ],
+            }
+
         if warnings:
             result["warnings"] = warnings
         return result
