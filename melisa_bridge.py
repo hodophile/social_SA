@@ -87,6 +87,7 @@ def analyze_with_melisa(
     - raw Melisa sentiment (label / score / confidence / fusion)
     - final labels matched to our emotion schema
     - valence on the same -1..+1 scale as ours (their fused score)
+    - per-frame emotion log (for video) to compare with temporal pipeline
     """
 
     mime_type = None
@@ -131,7 +132,7 @@ def analyze_with_melisa(
                 emotion_distribution[emotion] + float(p), 3
             )
 
-    return {
+    result = {
         "status": "ok",
         "detected_input": getattr(
             routed.detected_input, "value", str(routed.detected_input)
@@ -163,3 +164,40 @@ def analyze_with_melisa(
         },
         "warnings": analysis.warnings,
     }
+
+    # ---- per-frame emotion log (for video comparison) ----
+    if media_path and mime_type and mime_type.startswith("video"):
+        try:
+            # Re-use the pipeline's internal video analyzer (models already loaded)
+            pipeline = get_melisa_pipeline()
+            va = getattr(pipeline, "_video_analyzer", None)
+            if va is None:
+                from src.analyzers.video import VideoAnalyzer
+                from src.analyzers.audio import AudioAnalyzer
+                from src.analyzers.text import TextSentimentAnalyzer
+                va = VideoAnalyzer(
+                    audio_analyzer=AudioAnalyzer(
+                        whisper_model="base.en",
+                        compute_type="int8",
+                        language="en",
+                    ),
+                    text_analyzer=TextSentimentAnalyzer(),
+                )
+            bundle = va.analyze(media_path)
+            if bundle.frame_emotions:
+                result["frame_log"] = [
+                    {
+                        "timestamp": f.get("timestamp_seconds"),
+                        "label": f.get("label"),
+                        "score": f.get("score"),
+                        "confidence": f.get("confidence"),
+                        "probabilities": f.get("probabilities"),
+                    }
+                    for f in bundle.frame_emotions
+                ]
+        except Exception as exc:
+            result["warnings"] = list(result.get("warnings", [])) + [
+                f"Per-frame logging failed: {exc}"
+            ]
+
+    return result

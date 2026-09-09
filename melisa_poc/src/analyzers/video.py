@@ -42,6 +42,7 @@ class VideoAnalysisBundle:
     diagnostics: VideoDiagnostics
     warnings: list[str] = field(default_factory=list)
     overall: Optional[SentimentEvidence] = None
+    frame_emotions: list[dict] = field(default_factory=list)  # per-frame sentiment scores
 
 
 def _ocr_frame_indices(n_frames: int, max_ocr: int) -> set[int]:
@@ -182,6 +183,7 @@ class VideoAnalyzer:
                         frame_errors[idx] = str(exc)
 
             frame_visuals: list[SentimentEvidence] = []
+            frame_emotions: list[dict] = []
             ocr_sentiments: list[SentimentEvidence] = []
             ocr_texts: list[str] = []
             frame_debug: list[VideoFrameDebug] = []
@@ -229,6 +231,16 @@ class VideoAnalyzer:
                         ocr_texts.append(ocr_text)
                     if ocr_sentiment is not None:
                         ocr_sentiments.append(ocr_sentiment)
+
+                    # Collect per-frame emotion data for comparison logging
+                    frame_emotions.append({
+                        "index": idx,
+                        "timestamp_seconds": ts,
+                        "label": visual.label,
+                        "score": visual.score,
+                        "confidence": visual.confidence,
+                        "probabilities": visual.probabilities,
+                    })
 
                     if self.debug:
                         frame_debug.append(
@@ -331,6 +343,7 @@ class VideoAnalyzer:
                 diagnostics=diagnostics,
                 warnings=warnings,
                 overall=overall,
+                frame_emotions=frame_emotions,
             )
         finally:
             if tmp_root is not None:
