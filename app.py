@@ -114,7 +114,7 @@ def analyze_video(video_path: str, text: str) -> dict:
 # ------------------------------------------------------------------
 # Gradio UI
 # ------------------------------------------------------------------
-with gr.Blocks(title="PLM Video Analysis") as demo:
+with gr.Blocks(title="PLM Video Analysis", show_api=False) as demo:
     gr.Markdown("# Perception-LM-1B Video Understanding")
     gr.Markdown(
         "Runs `facebook/Perception-LM-1B` locally on the Space. "
@@ -132,17 +132,18 @@ with gr.Blocks(title="PLM Video Analysis") as demo:
             analyze_btn = gr.Button("Analyze", variant="primary")
 
         with gr.Column():
-            output_json = gr.JSON(label="Result")
             output_text = gr.Textbox(label="Generated Text", lines=15)
 
     def _analyze(video, text):
         result = analyze_video(video, text)
-        return result, result.get("generated_text", result.get("error", ""))
+        if "error" in result:
+            return f"ERROR: {result['error']}"
+        return result.get("generated_text", "No output")
 
     analyze_btn.click(
         fn=_analyze,
         inputs=[video_input, text_input],
-        outputs=[output_json, output_text],
+        outputs=[output_text],
     )
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 # PLM HF Space - runs facebook/Perception-LM-1B locally
-gradio>=5.0
+gradio==5.16.0
+gradio-client==1.7.1
 torch>=2.1
 transformers>=4.45
 accelerate>=0.30
