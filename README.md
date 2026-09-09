@@ -1,3 +1,15 @@
+---
+title: PLM Video Analysis
+emoji: 🎥
+colorFrom: purple
+colorTo: blue
+sdk: gradio
+sdk_version: "5.0.0"
+python_version: "3.10"
+app_file: app.py
+pinned: false
+---
+
 # PLM Video Analysis (Local Model)
 
 This Hugging Face Space runs `facebook/Perception-LM-1B` locally for video understanding.
