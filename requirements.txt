@@ -1,8 +1,11 @@
-# PLM HF Space - uses Inference API, no heavy local models
+# PLM HF Space - runs facebook/Perception-LM-1B locally
 gradio>=5.0
+torch>=2.1
+transformers>=4.45
+accelerate>=0.30
+decord>=0.6.0
 huggingface-hub>=0.23
-requests>=2.31
 Pillow>=10.0.0
-ffmpeg-python>=0.2.0
+numpy>=1.24
 
 # Note: ffmpeg system binary is installed via packages.txt (apt)

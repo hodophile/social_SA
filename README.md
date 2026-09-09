@@ -1,23 +1,26 @@
-# PLM Video Analysis (HF Inference)
+# PLM Video Analysis (Local Model)
 
-This Hugging Face Space demonstrates video understanding using Hugging Face Inference API instead of local model loading.
+This Hugging Face Space runs `facebook/Perception-LM-1B` locally for video understanding.
 
 ## How it works
 
 1. Upload a video
 2. Enter a prompt/question
-3. The Space extracts frames using ffmpeg
-4. Each frame is sent to a Vision-Language Model (Qwen2.5-VL-3B-Instruct) via HF Inference API
-5. Frame descriptions are aggregated by an LLM (Llama-3.2-3B-Instruct)
+3. The Space downloads and runs `facebook/Perception-LM-1B` locally
+4. Uses `decord` video backend and 32-frame sampling
+5. Generates a response directly from the model
+
+## Hardware
+
+This Space requires a **GPU tier** because the model runs locally on CUDA.
 
 ## Required Secrets
 
-Set in Space Settings → Secrets:
+No secrets required for public models. Ensure the Space has:
 
-- `HF_TOKEN` — your Hugging Face access token
+- Sufficient disk space for the 1B model download
+- GPU hardware tier
 
-## Models Used
+## Implementation
 
-- VLM: `Qwen/Qwen2.5-VL-3B-Instruct`
-- LLM: `meta-llama/Llama-3.2-3B-Instruct`
-- PLM: `facebook/Perception-LM-1B` (for text-only if available)
+This implementation mirrors `tests/plm2.py` but accepts user-uploaded videos instead of downloading from a dataset.
