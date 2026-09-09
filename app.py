@@ -114,7 +114,7 @@ def analyze_video(video_path: str, text: str) -> dict:
 # ------------------------------------------------------------------
 # Gradio UI
 # ------------------------------------------------------------------
-with gr.Blocks(title="PLM Video Analysis", show_api=False) as demo:
+with gr.Blocks(title="PLM Video Analysis") as demo:
     gr.Markdown("# Perception-LM-1B Video Understanding")
     gr.Markdown(
         "Runs `facebook/Perception-LM-1B` locally on the Space. "
