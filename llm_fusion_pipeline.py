@@ -332,12 +332,13 @@ class TimestampLLMFusionPipeline:
             emotion_analysis = self._fallback_emotion(
                 frame_results, text, reason="OPENROUTER_API_KEY not configured"
             )
-        elif not frame_results:
-            warnings.append("No visual frames available for LLM fusion")
+        elif not frame_results and not text:
+            warnings.append("No visual frames or text available for LLM fusion")
             emotion_analysis = self._fallback_emotion(
-                frame_results, text, reason="No visual frames to analyze"
+                frame_results, text, reason="No visual frames or text to analyze"
             )
         else:
+            # Go to OpenRouter if we have frames OR text
             try:
                 prompt = self._build_prompt(
                     frame_results, transcript, text,
