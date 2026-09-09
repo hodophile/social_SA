@@ -1,13 +1,15 @@
 """
 llm_fusion_pipeline.py — Send per-frame SigLIP emotions + timestamps +
-audio transcript + caption to OpenRouter for final 8-emotion synthesis.
+audio transcript (with speaker diarization) + caption to OpenRouter for
+final 8-emotion synthesis.
 
-This is the "timestamp-LLM-fusion" architecture:
+Architecture:
     video → frames + timestamps → SigLIP emotions
-    audio → Faster-Whisper → transcript
+    audio → Faster-Whisper → transcript + segments
+            → diarization (pause-based speaker segmentation)
     text → caption
          |
-         v    all context in one prompt
+         v    all context in one prompt (with speaker labels)
     OpenRouter (GPT-4o-mini)
          |
          v    structured JSON
@@ -35,12 +37,7 @@ from melisa_poc.src.analyzers.audio import AudioAnalyzer
 # ------------------------------------------------------------------
 # OpenRouter API configuration
 # ------------------------------------------------------------------
-# Option 1: Set via environment variable (recommended for HF Spaces)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-
-# Option 2: Hardcode placeholder (for local testing only — replace with real key)
-# OPENROUTER_API_KEY = "sk-or-v1-your-openrouter-key-here"
-
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -55,9 +52,64 @@ VALENCE_MAP = {
     "sadness": -1.0, "disgust": -0.8,
 }
 
+# ------------------------------------------------------------------
+# Logging helpers
+# ------------------------------------------------------------------
+_LOG_DIR = Path("/tmp")
+_LOG_FILE = _LOG_DIR / "openrouter_prompts.log"
+
+
+def _log_to_file(label: str, content: str) -> None:
+    """Append labeled content to the shared log file."""
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(f"\n{'=' * 80}\n")
+            fh.write(f"[{label}] {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            fh.write(f"{'=' * 80}\n")
+            fh.write(content)
+            fh.write("\n")
+    except Exception as exc:
+        print(f"[LOG ERROR] Could not write to {_LOG_FILE}: {exc}")
+
+
+# ------------------------------------------------------------------
+# Speaker diarization (lightweight, pause-based)
+# ------------------------------------------------------------------
+def _diarize_segments(segments: List[Dict[str, Any]], pause_threshold: float = 1.0) -> List[Dict[str, Any]]:
+    """Label Whisper segments with speaker IDs based on pause gaps."""
+    if not segments:
+        return []
+
+    sorted_segs = sorted(segments, key=lambda s: s.get("start", 0))
+    diarized: List[Dict[str, Any]] = []
+    speaker_idx = 0
+
+    for i, seg in enumerate(sorted_segs):
+        if i > 0:
+            gap = seg.get("start", 0) - sorted_segs[i - 1].get("end", 0)
+            if gap > pause_threshold:
+                speaker_idx += 1
+        diarized.append({
+            "start": seg.get("start", 0),
+            "end": seg.get("end", 0),
+            "text": seg.get("text", ""),
+            "speaker": f"Speaker {chr(ord('A') + speaker_idx)}",
+        })
+
+    # Merge consecutive same-speaker segments
+    merged: List[Dict[str, Any]] = []
+    for seg in diarized:
+        if merged and merged[-1]["speaker"] == seg["speaker"]:
+            merged[-1]["end"] = seg["end"]
+            merged[-1]["text"] = (merged[-1]["text"] + " " + seg["text"]).strip()
+        else:
+            merged.append(seg.copy())
+    return merged
+
 
 class TimestampLLMFusionPipeline:
-    """Pipeline that fuses per-frame emotions + audio + text via LLM."""
+    """Pipeline that fuses per-frame emotions + audio (with diarization) + text via LLM."""
 
     def __init__(
         self,
@@ -75,7 +127,6 @@ class TimestampLLMFusionPipeline:
         self._api_key = openrouter_api_key or OPENROUTER_API_KEY
         self._model = openrouter_model or OPENROUTER_MODEL
 
-        # Debug: log key status (never log the actual key)
         import logging
         logger = logging.getLogger(__name__)
         if self._api_key:
@@ -92,18 +143,31 @@ class TimestampLLMFusionPipeline:
         frame_results: List[Dict],
         transcript: Optional[str],
         caption: Optional[str],
+        diarized_segments: Optional[List[Dict]] = None,
     ) -> str:
         lines = [
             "You are an expert multimodal emotion analyst.",
-            "You receive three sources of evidence about a social media post:",
+            "You receive multiple sources of evidence about a social media post:",
             "  1. Per-frame visual emotion analysis (SigLIP zero-shot)",
-            "  2. Audio transcript ( Whisper ASR )",
+            "  2. Audio transcript with speaker diarization (Whisper ASR + pause-based segmentation)",
             "  3. Text caption",
             "",
             "Your task: synthesize ALL evidence into a single coherent 8-emotion assessment.",
             "",
-            "=== PER-FRAME VISUAL EVIDENCE ===",
         ]
+
+        # Diarization section
+        if diarized_segments:
+            unique_speakers = sorted({s["speaker"] for s in diarized_segments})
+            lines.append("=== SPEAKER DIARIZATION ===")
+            lines.append(f"Detected {len(unique_speakers)} speaker(s): {', '.join(unique_speakers)}")
+            lines.append("")
+            for seg in diarized_segments:
+                lines.append(f"  [{seg['start']:.1f}s-{seg['end']:.1f}s] {seg['speaker']}: \"{seg['text']}\"")
+            lines.append("")
+
+        # Frame evidence
+        lines.append("=== PER-FRAME VISUAL EVIDENCE ===")
         for fr in frame_results:
             ts = fr.get("timestamp_seconds", 0)
             emotions = fr.get("emotions")
@@ -123,7 +187,7 @@ class TimestampLLMFusionPipeline:
             f"  {caption or 'No caption provided.'}",
             "",
             "=== INSTRUCTIONS ===",
-            "Based on ALL the evidence above, produce a JSON object with exactly this shape:",
+            "Based on ALL the evidence above (including speaker labels), produce a JSON object with exactly this shape:",
             "{",
             '  "primary_emotion": "<one of: joy, sadness, anger, fear, surprise, disgust, trust, anticipation>",',
             '  "secondary_emotion": "<one of the eight or null>",',
@@ -135,12 +199,13 @@ class TimestampLLMFusionPipeline:
             "  },",
             '  "valence": -1.0 to +1.0,',
             '  "confidence": 0.0 to 1.0,',
-            '  "rationale": "<one sentence explaining how you combined visual, audio, and text evidence>"',
+            '  "rationale": "<one sentence explaining how you combined visual, audio, and speaker evidence>"',
             "}",
             "",
             "Rules:",
             "- emotion_scores must sum to 1.0 (use softmax if needed).",
             "- Consider temporal dynamics: does emotion shift across frames?",
+            "- Speaker dynamics: different speakers may convey different emotions.",
             "- Audio transcript can override visual if they strongly disagree.",
             "- Caption text provides intent/context that visual alone may miss.",
             "- Return ONLY the JSON object, no markdown, no explanation outside JSON.",
@@ -148,18 +213,19 @@ class TimestampLLMFusionPipeline:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # Call Kimi (Moonshot AI)
+    # Call OpenRouter
     # ------------------------------------------------------------------
     def _call_llm(self, prompt: str) -> Dict[str, Any]:
         if not self._api_key:
             raise RuntimeError("OPENROUTER_API_KEY not set")
 
-        # Log prompt
-        print("\n" + "="*80)
+        # Log to stdout and file
+        print("\n" + "=" * 80)
         print("PROMPT SENT TO OPENROUTER")
-        print("="*80)
+        print("=" * 80)
         print(prompt)
-        print("="*80 + "\n")
+        print("=" * 80 + "\n")
+        _log_to_file("PROMPT", prompt)
 
         r = requests.post(
             OPENROUTER_API_URL,
@@ -178,7 +244,6 @@ class TimestampLLMFusionPipeline:
             timeout=120,
         )
 
-        # Provide clearer errors for common HTTP failures
         if r.status_code == 401:
             raise RuntimeError("OpenRouter returned 401 Unauthorized — check your API key")
         if r.status_code == 404:
@@ -197,13 +262,13 @@ class TimestampLLMFusionPipeline:
         raw = resp["choices"][0]["message"]["content"]
 
         # Log response
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("RAW RESPONSE FROM OPENROUTER")
-        print("="*80)
+        print("=" * 80)
         print(raw)
-        print("="*80 + "\n")
+        print("=" * 80 + "\n")
+        _log_to_file("RESPONSE", raw)
 
-        # Extract JSON
         start, end = raw.find("{"), raw.rfind("}") + 1
         if start == -1 or end <= start:
             raise ValueError(f"LLM did not return JSON: {raw[:200]}")
@@ -239,17 +304,29 @@ class TimestampLLMFusionPipeline:
             except Exception as exc:
                 warnings.append(f"SigLIP image analysis failed: {exc}")
 
-        # 2. Audio: Whisper transcript
+        # 2. Audio: Whisper transcript + segments for diarization
         transcript: Optional[str] = None
+        asr_segments: List[Dict] = []
         if video_path:
             try:
                 speech = self._audio.analyze(video_path)
                 transcript = speech.transcript
+                # Extract segments for diarization
+                for seg in speech.segments:
+                    asr_segments.append({
+                        "start": seg.start,
+                        "end": seg.end,
+                        "text": seg.text,
+                    })
             except Exception as exc:
                 warnings.append(f"Audio analysis failed: {exc}")
 
-        # 3. LLM fusion
+        # 3. Speaker diarization
+        diarized_segments = _diarize_segments(asr_segments) if asr_segments else None
+
+        # 4. LLM fusion
         emotion_analysis: Dict[str, Any] = {}
+        llm_debug = None
         if not self._api_key:
             warnings.append("OPENROUTER_API_KEY not set — set it in Space Settings → Secrets")
             emotion_analysis = self._fallback_emotion(
@@ -261,9 +338,11 @@ class TimestampLLMFusionPipeline:
                 frame_results, text, reason="No visual frames to analyze"
             )
         else:
-            llm_debug = None
             try:
-                prompt = self._build_prompt(frame_results, transcript, text)
+                prompt = self._build_prompt(
+                    frame_results, transcript, text,
+                    diarized_segments=diarized_segments,
+                )
                 llm_out = self._call_llm(prompt)
                 emotion_analysis = {
                     "emotion_model": f"timestamp-llm-fusion ({self._model})",
@@ -315,8 +394,19 @@ class TimestampLLMFusionPipeline:
             "emotion_analysis": emotion_analysis,
             "frame_timestamps": frame_results,
         }
+
+        # Add diarization
+        if diarized_segments:
+            result["diarization"] = {
+                "num_speakers": len({s["speaker"] for s in diarized_segments}),
+                "speaker_labels": sorted({s["speaker"] for s in diarized_segments}),
+                "segments": diarized_segments,
+            }
+
+        # Add LLM debug
         if llm_debug:
             result["_llm_debug"] = llm_debug
+
         if warnings:
             result["warnings"] = warnings
         return result
@@ -329,7 +419,6 @@ class TimestampLLMFusionPipeline:
     ) -> Dict[str, Any]:
         """Heuristic fallback when LLM is unavailable."""
         if not frame_results:
-            # Text-only: use simple heuristic
             if caption and ("happy" in caption.lower() or "love" in caption.lower() or "excited" in caption.lower()):
                 primary = "joy"
             elif caption and ("sad" in caption.lower() or "cry" in caption.lower()):
@@ -352,7 +441,6 @@ class TimestampLLMFusionPipeline:
                 "rationale": f"Fallback: {reason}. Used text heuristic.",
             }
 
-        # Average frame emotions
         avg = {e: 0.0 for e in EMOTION_LABELS}
         valid = 0
         for fr in frame_results:
