@@ -11,6 +11,16 @@ import tempfile
 import torch
 from pathlib import Path
 
+# Monkey-patch gradio_client JSON-schema bug (additionalProperties=True is bool)
+import gradio_client.utils as _gc_utils
+_orig_get_type = _gc_utils.get_type
+
+def _patched_get_type(schema):
+    if isinstance(schema, bool):
+        return "Any"
+    return _orig_get_type(schema)
+_gc_utils.get_type = _patched_get_type
+
 import gradio as gr
 from transformers import AutoProcessor, AutoModelForImageTextToText
 
