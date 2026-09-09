@@ -1,185 +1,223 @@
 """
-app.py – Gradio UI for side-by-side comparison:
-    * Initial Version  – Melisa POC (melisa_poc/, late fusion)
-    * Timestamp-LLM    – per-frame SigLIP + timestamps → OpenRouter GPT-4o-mini
+app.py – Gradio UI for PLM (Perception-LM-1B) video understanding.
 
-Both outputs are shown in the JSON format with execution_time_seconds,
-understanding, risk, action, emotion_analysis, plus frame_timestamps for
-the timestamp-LLM version.
+Uses Hugging Face Inference Client instead of local model loading.
+Supports video + text input.
 """
 from __future__ import annotations
 
 import os
-
-# CPU-only Space fix: neutralise spaces.GPU before Melisa loads it
-import spaces
-spaces.GPU = lambda **kwargs: lambda f: f  # no-op decorator
-
+import subprocess
+import tempfile
 from pathlib import Path
 
 import gradio as gr
+from huggingface_hub import InferenceClient
 
-# ----------------------------------------------------------------------
-# Pipelines
-# ----------------------------------------------------------------------
-from melisa_bridge import analyze_with_melisa              # Melisa POC
-from llm_fusion_pipeline import TimestampLLMFusionPipeline  # new
+# ------------------------------------------------------------------
+# Config
+# ------------------------------------------------------------------
+HF_TOKEN = os.environ.get("HF_TOKEN")
+PLM_MODEL = os.environ.get("PLM_MODEL", "facebook/Perception-LM-1B")
+VLM_MODEL = os.environ.get("VLM_MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")
+LLM_MODEL = os.environ.get("LLM_MODEL", "meta-llama/Llama-3.2-3B-Instruct")
 
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+client = InferenceClient(token=HF_TOKEN) if HF_TOKEN else None
 
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+def extract_frames(video_path: str, sample_fps: float = 1.0, max_frames: int = 8) -> list:
+    """Extract frames from video using ffmpeg."""
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+        capture_output=True, text=True,
+    )
+    duration = float(probe.stdout.strip()) if probe.returncode == 0 else 10.0
 
-# ----------------------------------------------------------------------
-# Lazy singleton
-# ----------------------------------------------------------------------
-_llm_pipeline: TimestampLLMFusionPipeline | None = None
+    num_frames = min(max_frames, int(duration * sample_fps))
+    if num_frames < 1:
+        num_frames = 1
 
-
-def get_llm_pipeline() -> TimestampLLMFusionPipeline:
-    global _llm_pipeline
-    if _llm_pipeline is None:
-        _llm_pipeline = TimestampLLMFusionPipeline(
-            openrouter_api_key=OPENROUTER_API_KEY,
-            openrouter_model=OPENROUTER_MODEL,
+    frames = []
+    for i in range(num_frames):
+        timestamp = (i / max(num_frames - 1, 1)) * duration
+        frame_path = f"/tmp/plm_frame_{i:04d}.png"
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-ss", str(timestamp), "-i", video_path,
+             "-frames:v", "1", "-f", "image2", frame_path],
+            capture_output=True,
         )
-    return _llm_pipeline
+        if result.returncode == 0 and Path(frame_path).exists():
+            frames.append(frame_path)
+
+    return frames
 
 
-# ----------------------------------------------------------------------
-# Main entry: run both pipelines and compare
-# ----------------------------------------------------------------------
-def analyze(text: str, image: str, video: str, sample_fps: float):
-    if not text and not image and not video:
-        err = {"error": "Provide at least one of: text, image, video."}
-        return err, err, {}
+def describe_frame(frame_path: str, prompt: str, frame_idx: int) -> str:
+    """Send a single frame to VLM for description."""
+    if not client:
+        return "[Error: HF_TOKEN not set]"
 
-    # Melisa routes a single input (text XOR media) -> media wins.
-    media_path = None
-    if video:
-        media_path = str(video)
-    elif image:
-        media_path = str(image)
+    try:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "url": f"file://{frame_path}"},
+                    {"type": "text", "text": f"Frame {frame_idx}: {prompt}"},
+                ],
+            }
+        ]
 
-    # ---------------- Initial Version (Melisa POC) ----------------
-    melisa_res = analyze_with_melisa(
-        text=None if media_path else (text or None),
-        media_path=media_path,
-    )
-
-    # ---------------- Timestamp-LLM Version -----------------------
-    llm_res = get_llm_pipeline().analyze(
-        text=text or None,
-        image_path=Path(image) if image else None,
-        video_path=Path(video) if video else None,
-        sample_fps=sample_fps,
-    )
-
-    # ---------------- Comparison summary -------------------------
-    llm_emo = llm_res.get("emotion_analysis", {})
-
-    comparison = {
-        "initial_version": {
-            "matched_emotion": melisa_res.get("matched_emotion"),
-            "initial_label": melisa_res.get("initial_label"),
-            "valence": melisa_res.get("valence"),
-            "confidence": melisa_res.get("initial_confidence"),
-        },
-        "timestamp_llm_version": {
-            "primary_emotion": llm_emo.get("primary_emotion"),
-            "primary_emotion_score": llm_emo.get(
-                "primary_emotion_score"
-            ),
-            "valence": llm_emo.get("valence"),
-            "confidence": llm_emo.get("confidence"),
-        },
-    }
-
-    v1_emo = comparison["initial_version"]["matched_emotion"]
-    v2_emo = comparison["timestamp_llm_version"]["primary_emotion"]
-
-    if v1_emo and v2_emo:
-        comparison["emotions_match"] = v1_emo == v2_emo
-
-        v1_val = comparison["initial_version"]["valence"]
-        v2_val = comparison["timestamp_llm_version"]["valence"]
-        if v1_val is not None and v2_val is not None:
-            comparison["valence_gap"] = round(abs(v1_val - v2_val), 3)
-
-    return melisa_res, llm_res, comparison
-
-
-# ----------------------------------------------------------------------
-# UI text
-# ----------------------------------------------------------------------
-DESCRIPTION = (
-    "Side-by-side comparison of two sentiment/emotion pipelines.\n\n"
-
-    "**Initial Version — Melisa POC** (per-modality models + late fusion):\n"
-    "- Frames scored independently (SigLIP zero-shot), then averaged — "
-    "**no temporal model**\n"
-    "- Audio: Whisper ASR -> RoBERTa sentiment on the transcript\n"
-    "- Caption: RoBERTa sentiment\n"
-    "- Confidence-weighted late fusion -> positive / neutral / negative, "
-    "mapped onto the emotion labels (positive->joy, neutral->trust, "
-    "negative->sadness)\n\n"
-
-    "**Timestamp-LLM Version** (per-frame + LLM synthesis):\n"
-    "- Video → extract frames at sample_fps with timestamps\n"
-    "- Each frame → SigLIP zero-shot 8-emotion classification\n"
-    "- Audio → Faster-Whisper → transcript\n"
-    "- **ALL context sent to OpenRouter GPT-4o-mini**: frame emotions + "
-    "timestamps + audio transcript + caption\n"
-    "- LLM synthesizes temporal dynamics and cross-modal agreement\n"
-    "- Returns full 8-emotion distribution with rationale\n"
-)
-
-with gr.Blocks(
-    title="Initial Version (Melisa) vs Timestamp-LLM-Fusion",
-    theme=gr.themes.Soft(primary_hue="indigo"),
-) as demo:
-
-    gr.Markdown("# Social Media Post Analysis — Timestamp-LLM vs Melisa")
-    gr.Markdown(DESCRIPTION)
-
-    with gr.Row():
-        text_in = gr.Textbox(label="Post text / caption", lines=3)
-        image_in = gr.Image(label="Image (optional)", type="filepath")
-        video_in = gr.Video(label="Video (optional)")
-        fps_in = gr.Slider(
-            0.2, 5.0, value=1.0, step=0.2,
-            label="Video frame sampling (fps)",
+        result = client.chat_completion(
+            messages=messages,
+            model=VLM_MODEL,
+            max_tokens=128,
         )
 
-    analyze_btn = gr.Button("Analyze with both", variant="primary")
+        return result.choices[0].message.content
 
-    gr.Markdown("## Comparison")
-    comparison_out = gr.JSON(label="Side-by-side summary")
+    except Exception as exc:
+        return f"[VLM Error: {type(exc).__name__}: {str(exc)[:100]}]"
+
+
+def aggregate_descriptions(frame_descriptions: list, original_prompt: str) -> str:
+    """Aggregate frame descriptions using an LLM."""
+    if not client:
+        return "[Error: HF_TOKEN not set]"
+
+    try:
+        descriptions_text = "\n".join(
+            f"Frame {d['frame_index']} (t={d['timestamp_seconds']}s): {d['description']}"
+            for d in frame_descriptions
+        )
+
+        prompt = f"""Based on these frame-by-frame descriptions of a video, provide a coherent overall description.
+
+Original question: {original_prompt}
+
+Frame descriptions:
+{descriptions_text}
+
+Overall description:"""
+
+        result = client.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            model=LLM_MODEL,
+            max_tokens=256,
+            temperature=0.7,
+        )
+        return result.choices[0].message.content
+
+    except Exception as exc:
+        return f"[Aggregation Error: {type(exc).__name__}: {str(exc)[:100]}]"
+
+
+# ------------------------------------------------------------------
+# Main analysis function
+# ------------------------------------------------------------------
+def analyze_video(video_file, text_prompt, sample_fps, max_frames):
+    """Analyze video with PLM via HF Inference Client."""
+    if not client:
+        return {"error": "HF_TOKEN not set. Set it in Space Settings → Secrets."}
+
+    if video_file is None:
+        return {"error": "Please upload a video file."}
+
+    # Save uploaded video
+    suffix = Path(video_file.name).suffix if hasattr(video_file, 'name') else ".mp4"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        if hasattr(video_file, 'read'):
+            tmp.write(video_file.read())
+        else:
+            # Gradio file path
+            import shutil
+            shutil.copy(video_file, tmp.name)
+        video_path = tmp.name
+
+    try:
+        # Extract frames
+        frames = extract_frames(video_path, sample_fps, max_frames)
+        if not frames:
+            return {"error": "No frames could be extracted from video."}
+
+        # Analyze each frame
+        frame_descriptions = []
+        for i, frame_path in enumerate(frames):
+            desc = describe_frame(frame_path, text_prompt, i)
+            frame_descriptions.append({
+                "frame_index": i,
+                "timestamp_seconds": round(i / sample_fps, 2) if sample_fps > 0 else i,
+                "description": desc,
+            })
+
+        # Aggregate
+        aggregated = aggregate_descriptions(frame_descriptions, text_prompt)
+
+        return {
+            "status": "ok",
+            "vlm_model": VLM_MODEL,
+            "llm_model": LLM_MODEL,
+            "prompt": text_prompt,
+            "num_frames": len(frames),
+            "frame_descriptions": frame_descriptions,
+            "aggregated_description": aggregated,
+        }
+
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {str(exc)}"}
+    finally:
+        # Cleanup
+        try:
+            os.unlink(video_path)
+            for f in frames:
+                os.unlink(f)
+        except Exception:
+            pass
+
+
+# ------------------------------------------------------------------
+# Gradio UI
+# ------------------------------------------------------------------
+with gr.Blocks(title="PLM Video Analysis (HF Inference)") as demo:
+    gr.Markdown("# Perception-LM-1B Video Understanding")
+    gr.Markdown("Uses Hugging Face Inference API — no local model download needed.")
 
     with gr.Row():
         with gr.Column():
-            gr.Markdown("### Initial Version (Melisa POC, late fusion)")
-            melisa_out = gr.JSON(
-                label="Initial Version sentiment (labels matched to emotions)"
+            video_input = gr.Video(label="Upload Video")
+            text_input = gr.Textbox(
+                label="Prompt",
+                value="Describe what happens in this video",
+                lines=2,
             )
+            sample_fps = gr.Slider(
+                label="Frame Sampling (fps)",
+                minimum=0.5,
+                maximum=5.0,
+                value=1.0,
+                step=0.5,
+            )
+            max_frames = gr.Slider(
+                label="Max Frames",
+                minimum=1,
+                maximum=16,
+                value=8,
+                step=1,
+            )
+            analyze_btn = gr.Button("Analyze", variant="primary")
+
         with gr.Column():
-            gr.Markdown("### Timestamp-LLM Version (SigLIP + OpenRouter)")
-            llm_out = gr.JSON(label="Timestamp-LLM result")
+            output_json = gr.JSON(label="Result")
+            output_text = gr.Textbox(label="Aggregated Description", lines=10)
 
     analyze_btn.click(
-        fn=analyze,
-        inputs=[text_in, image_in, video_in, fps_in],
-        outputs=[melisa_out, llm_out, comparison_out],
-    )
-
-    gr.Examples(
-        examples=[
-            ["I am so excited about this new project!", None, None, 1.0],
-        ],
-        inputs=[text_in, image_in, video_in, fps_in],
-        outputs=[melisa_out, llm_out, comparison_out],
-        fn=analyze,
-        cache_examples=False,
+        fn=lambda v, t, s, m: (analyze_video(v, t, s, m), analyze_video(v, t, s, m).get("aggregated_description", "")),
+        inputs=[video_input, text_input, sample_fps, max_frames],
+        outputs=[output_json, output_text],
     )
 
 if __name__ == "__main__":
-    demo.launch(ssr_mode=False)
+    demo.launch()
