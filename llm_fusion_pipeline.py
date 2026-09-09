@@ -154,6 +154,13 @@ class TimestampLLMFusionPipeline:
         if not self._api_key:
             raise RuntimeError("OPENROUTER_API_KEY not set")
 
+        # Log prompt
+        print("\n" + "="*80)
+        print("PROMPT SENT TO OPENROUTER")
+        print("="*80)
+        print(prompt)
+        print("="*80 + "\n")
+
         r = requests.post(
             OPENROUTER_API_URL,
             headers={
@@ -185,14 +192,24 @@ class TimestampLLMFusionPipeline:
         resp = r.json()
 
         if "choices" not in resp or not resp["choices"]:
-            raise RuntimeError(f"Kimi API returned empty choices: {json.dumps(resp)[:200]}")
+            raise RuntimeError(f"OpenRouter API returned empty choices: {json.dumps(resp)[:200]}")
 
         raw = resp["choices"][0]["message"]["content"]
+
+        # Log response
+        print("\n" + "="*80)
+        print("RAW RESPONSE FROM OPENROUTER")
+        print("="*80)
+        print(raw)
+        print("="*80 + "\n")
+
         # Extract JSON
         start, end = raw.find("{"), raw.rfind("}") + 1
         if start == -1 or end <= start:
             raise ValueError(f"LLM did not return JSON: {raw[:200]}")
-        return json.loads(raw[start:end])
+        parsed = json.loads(raw[start:end])
+        parsed["_debug"] = {"prompt_sent": prompt, "raw_response": raw}
+        return parsed
 
     # ------------------------------------------------------------------
     # Main entry
@@ -244,6 +261,7 @@ class TimestampLLMFusionPipeline:
                 frame_results, text, reason="No visual frames to analyze"
             )
         else:
+            llm_debug = None
             try:
                 prompt = self._build_prompt(frame_results, transcript, text)
                 llm_out = self._call_llm(prompt)
@@ -262,6 +280,7 @@ class TimestampLLMFusionPipeline:
                     ),
                     "rationale": llm_out.get("rationale", ""),
                 }
+                llm_debug = llm_out.get("_debug")
             except Exception as exc:
                 err_msg = f"{type(exc).__name__}: {exc}"
                 warnings.append(f"LLM fusion failed: {err_msg}")
@@ -296,6 +315,8 @@ class TimestampLLMFusionPipeline:
             "emotion_analysis": emotion_analysis,
             "frame_timestamps": frame_results,
         }
+        if llm_debug:
+            result["_llm_debug"] = llm_debug
         if warnings:
             result["warnings"] = warnings
         return result

@@ -353,6 +353,10 @@ class TemporalEmotionPipeline:
             "valence": float(parsed.get("valence", 0.0)),
             "confidence": float(parsed.get("confidence", 0.5)),
             "rationale": parsed.get("rationale", ""),
+            "_debug": {
+                "prompt_sent": prompt,
+                "raw_response": raw,
+            },
         }
 
     def _build_timeline_prompt(
@@ -513,9 +517,7 @@ class TemporalEmotionPipeline:
         # --- Fusion: LLM (timeline + diarization) or math fallback ---
         use_llm = bool(self._openrouter_key) and len(timeline) > 0
 
-        print("############### print use llm")
-        print(use_llm)
-
+        llm_debug = None
         if use_llm:
             try:
                 llm_result = self._llm_fusion(timeline, diarization=diarization)
@@ -526,6 +528,7 @@ class TemporalEmotionPipeline:
                 valence = llm_result["valence"]
                 rationale = llm_result["rationale"]
                 fusion_method = "openrouter_llm_timeline_diarization"
+                llm_debug = llm_result.get("_debug")
             except Exception as exc:
                 warnings.append(f"LLM fusion failed ({exc}); falling back to math fusion")
                 use_llm = False
@@ -615,6 +618,10 @@ class TemporalEmotionPipeline:
                     for s in diarization.segments
                 ],
             }
+
+        # Add LLM debug info (prompt + raw response)
+        if llm_debug:
+            result["_llm_debug"] = llm_debug
 
         if warnings:
             result["warnings"] = warnings
