@@ -294,6 +294,28 @@ class TemporalEmotionPipeline:
 
         prompt = self._build_timeline_prompt(timeline, diarization=diarization)
 
+        # Log prompt to stdout and file
+        print("\n" + "="*80)
+        print("PROMPT SENT TO OPENROUTER")
+        print("="*80)
+        print(prompt)
+        print("="*80 + "\n")
+
+        # Also save to file for inspection
+        try:
+            import tempfile, datetime
+            log_path = Path(tempfile.gettempdir()) / "openrouter_prompts.log"
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*80}\n")
+                f.write(f"Timestamp: {datetime.datetime.now().isoformat()}\n")
+                f.write(f"Model: {self._openrouter_model}\n")
+                f.write(f"{'='*80}\n")
+                f.write(prompt)
+                f.write("\n")
+            print(f"[LOG] Prompt saved to {log_path}")
+        except Exception as log_exc:
+            print(f"[LOG] Failed to save prompt: {log_exc}")
+
         r = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
@@ -310,6 +332,14 @@ class TemporalEmotionPipeline:
         )
         r.raise_for_status()
         raw = r.json()["choices"][0]["message"]["content"]
+
+        # Log raw response
+        print("\n" + "="*80)
+        print("RAW RESPONSE FROM OPENROUTER")
+        print("="*80)
+        print(raw)
+        print("="*80 + "\n")
+
         start, end = raw.find("{"), raw.rfind("}") + 1
         parsed = json.loads(raw[start:end])
 
@@ -482,6 +512,9 @@ class TemporalEmotionPipeline:
 
         # --- Fusion: LLM (timeline + diarization) or math fallback ---
         use_llm = bool(self._openrouter_key) and len(timeline) > 0
+
+        print("############### print use llm")
+        print(use_llm)
 
         if use_llm:
             try:
