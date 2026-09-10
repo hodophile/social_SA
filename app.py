@@ -13,13 +13,24 @@ from pathlib import Path
 
 # Monkey-patch gradio_client JSON-schema bug (additionalProperties=True is bool)
 import gradio_client.utils as _gc_utils
+
 _orig_get_type = _gc_utils.get_type
 
 def _patched_get_type(schema):
     if isinstance(schema, bool):
         return "Any"
     return _orig_get_type(schema)
+
 _gc_utils.get_type = _patched_get_type
+
+_orig_json_schema_to_python_type = _gc_utils._json_schema_to_python_type
+
+def _patched_json_schema_to_python_type(schema, defs):
+    if isinstance(schema, bool):
+        return "Any"
+    return _orig_json_schema_to_python_type(schema, defs)
+
+_gc_utils._json_schema_to_python_type = _patched_json_schema_to_python_type
 
 import gradio as gr
 from transformers import AutoProcessor, AutoModelForImageTextToText
@@ -157,4 +168,4 @@ with gr.Blocks(title="PLM Video Analysis") as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=True)
