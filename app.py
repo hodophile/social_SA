@@ -52,7 +52,7 @@ _model = None
 def get_processor():
     global _processor
     if _processor is None:
-        _processor = AutoProcessor.from_pretrained(MODEL_PATH, use_fast=True)
+        _processor = AutoProcessor.from_pretrained(MODEL_PATH, backend="torchvision")
     return _processor
 
 
