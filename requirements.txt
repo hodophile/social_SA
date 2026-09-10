@@ -3,6 +3,7 @@ gradio==5.16.0
 gradio-client==1.7.0
 torch>=2.1
 torchvision>=0.16
+torchcodec>=0.2.1
 transformers>=4.45
 accelerate>=0.30
 decord>=0.6.0

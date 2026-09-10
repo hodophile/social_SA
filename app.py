@@ -100,7 +100,7 @@ def analyze_video(video_path: str, text: str) -> dict:
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            video_load_backend="decord",
+            video_load_backend="torchcodec",
         )
         inputs = inputs.to(model.device)
 
@@ -147,8 +147,17 @@ with gr.Blocks(title="PLM Video Analysis") as demo:
             video_input = gr.Video(label="Upload Video")
             text_input = gr.Textbox(
                 label="Prompt",
-                value="Can you describe the video in detail?",
-                lines=2,
+                value=(
+                    "Analyze this video and provide a structured response with the following:\n"
+                    "1. CONTENT_DESCRIPTION: A detailed description of what happens in the video\n"
+                    "2. KEY_THEMES: Main themes and topics present\n"
+                    "3. SENTIMENT: Overall emotional tone (positive, negative, neutral, or mixed)\n"
+                    "4. VISUAL_ELEMENTS: Notable visual aspects (colors, settings, objects, people)\n"
+                    "5. AUDIO_ELEMENTS: Describe any speech, music, or sounds if present\n"
+                    "6. TARGET_AUDIENCE: Who this content appears to be for\n"
+                    "7. ENGAGEMENT_POTENTIAL: Why viewers might find this engaging"
+                ),
+                lines=8,
             )
             analyze_btn = gr.Button("Analyze", variant="primary")
 
