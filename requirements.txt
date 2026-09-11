@@ -1,11 +1,14 @@
-# VideoPrism HF Space - runs google/videoprism-base-f16r288 locally
+# VideoPrism HF Space - follows official Colab demo
+# Uses JAX/Flax model from google-deepmind/videoprism repository
 gradio>=5.0.0
-torch>=2.1
+jax>=0.4.20
+mediapy>=0.1.9
+numpy>=1.24
+Pillow>=10.0.0
+sentence-transformers>=2.5.0
 transformers>=4.45
 accelerate>=0.30
-sentence-transformers>=2.5.0
 huggingface-hub>=0.28.1
-Pillow>=10.0.0
-numpy>=1.24
 
+# Note: videoprism package is installed from source in Dockerfile
 # Note: ffmpeg system binary is installed via Dockerfile (apt)

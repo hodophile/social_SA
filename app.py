@@ -1,32 +1,42 @@
 """
-app.py – Gradio UI for VideoPrism video understanding.
+app.py – Gradio UI for VideoPrism video-text matching.
+Follows the official Google DeepMind VideoPrism Colab demo:
+https://colab.research.google.com/github/google-deepmind/videoprism/blob/main/videoprism/colabs/videoprism_video_text_demo.ipynb
 
-Uses google/videoprism-base-f16r288 for video feature extraction
-and zero-shot classification with text prompts for:
-- Video content explanation
-- Emotion detection
-- Video classification
+Uses JAX/Flax model from the videoprism repository for joint video-text encoding.
 """
 from __future__ import annotations
 
 import os
 import tempfile
-import torch
-import torch.nn.functional as F
 from pathlib import Path
 
 import gradio as gr
-from transformers import AutoModel, AutoVideoProcessor
-from sentence_transformers import SentenceTransformer
+import jax
+import jax.numpy as jnp
+import mediapy
+import numpy as np
+from PIL import Image
+
+# Import VideoPrism from the installed package
+try:
+    from videoprism import models as vp
+except ImportError:
+    # Fallback: if package not installed, try to import from local clone
+    import sys
+    sys.path.append("./videoprism_repo")
+    from videoprism import models as vp
 
 # ------------------------------------------------------------------
 # Config
 # ------------------------------------------------------------------
-MODEL_PATH = os.environ.get("VIDEOPRISM_MODEL", "google/videoprism-base-f16r288")
-TEXT_MODEL_PATH = os.environ.get("TEXT_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+MODEL_NAME = os.environ.get("VIDEOPRISM_MODEL", "videoprism_lvt_public_v1_base")
 NUM_FRAMES = int(os.environ.get("VIDEOPRISM_NUM_FRAMES", "16"))
+FRAME_SIZE = int(os.environ.get("VIDEOPRISM_FRAME_SIZE", "288"))
+TEMPERATURE = float(os.environ.get("VIDEOPRISM_TEMPERATURE", "0.01"))
+TOP_K = int(os.environ.get("VIDEOPRISM_TOP_K", "5"))
 
-# Predefined labels for zero-shot classification
+# Predefined labels for zero-shot classification (from original app)
 VIDEO_CATEGORIES = [
     "sports and fitness",
     "cooking and food",
@@ -48,95 +58,88 @@ EMOTION_LABELS = [
     "surprise and shock",
     "disgust and revulsion",
     "trust and comfort",
-    "anticipation and excitement",
-    "neutral and calm",
 ]
 
-# ------------------------------------------------------------------
-# Lazy singleton for models
-# ------------------------------------------------------------------
-_video_processor = None
-_video_model = None
-_text_model = None
-
-
-def get_video_processor():
-    global _video_processor
-    if _video_processor is None:
-        _video_processor = AutoVideoProcessor.from_pretrained(MODEL_PATH)
-    return _video_processor
-
-
-def get_video_model():
-    global _video_model
-    if _video_model is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        _video_model = AutoModel.from_pretrained(MODEL_PATH).to(device)
-        _video_model.eval()
-    return _video_model
-
-
-def get_text_model():
-    global _text_model
-    if _text_model is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        _text_model = SentenceTransformer(TEXT_MODEL_PATH, device=device)
-    return _text_model
-
+# Combine all labels for zero-shot classification
+ZERO_SHOT_LABELS = VIDEO_CATEGORIES + EMOTION_LABELS
 
 # ------------------------------------------------------------------
-# Feature extraction
+# Video preprocessing (from Colab)
 # ------------------------------------------------------------------
-def extract_video_features(video_path: str):
-    """Extract pooled video embedding from VideoPrism."""
-    processor = get_video_processor()
-    model = get_video_model()
-
-    processed = processor(
-        videos=[video_path],
-        return_metadata=True,
-        do_sample_frames=True,
+def read_and_preprocess_video(
+    filename: str, target_num_frames: int, target_frame_size: tuple[int, int]
+):
+    """Reads and preprocesses a video exactly like the Colab demo."""
+    frames = mediapy.read_video(filename)
+    
+    # Sample to target number of frames.
+    frame_indices = np.linspace(
+        0, len(frames), num=target_num_frames, endpoint=False, dtype=np.int32
     )
-    pixel_values = processed["pixel_values_videos"].to(model.device)
-
-    with torch.no_grad():
-        outputs = model(pixel_values)
-
-    # Use mean pooling of last hidden state
-    last_hidden = outputs.last_hidden_state
-    pooled = last_hidden.mean(dim=1)
-    return F.normalize(pooled, p=2, dim=1)
-
-
-def extract_text_features(texts: list[str]):
-    """Extract text embeddings from sentence-transformers."""
-    model = get_text_model()
-    embeddings = model.encode(texts, convert_to_tensor=True, show_progress_bar=False)
-    return F.normalize(embeddings, p=2, dim=1)
-
+    frames = np.array([frames[i] for i in frame_indices])
+    
+    # Resize to target size.
+    original_height, original_width = frames.shape[-3:-1]
+    target_height, target_width = target_frame_size
+    assert (
+        original_height * target_width == original_width * target_height
+    ), "Currently does not support aspect ratio mismatch."
+    frames = mediapy.resize_video(frames, shape=target_frame_size)
+    
+    # Normalize pixel values to [0.0, 1.0].
+    frames = mediapy.to_float01(frames)
+    
+    return frames
 
 # ------------------------------------------------------------------
-# Zero-shot classification
+# Text preprocessing (from Colab)
 # ------------------------------------------------------------------
-def zero_shot_classify(video_embedding, candidate_labels: list[str]):
-    """Return best matching label and similarity scores."""
-    text_embeddings = extract_text_features(candidate_labels)
-    similarities = torch.mm(video_embedding, text_embeddings.T).squeeze(0)
-    probs = F.softmax(similarities / 0.1, dim=0)
+def prepare_text_queries(text_queries, prompt_template="a video of {}."):
+    """Prepare text queries with prompt template like the Colab."""
+    return [prompt_template.format(t) for t in text_queries]
 
-    best_idx = int(similarities.argmax())
-    scores = {
-        label: round(float(prob), 4)
-        for label, prob in zip(candidate_labels, probs.cpu().numpy())
-    }
-    return candidate_labels[best_idx], scores
+# ------------------------------------------------------------------
+# Lazy singleton for model and tokenizer
+# ------------------------------------------------------------------
+_flax_model = None
+_loaded_state = None
+_text_tokenizer = None
+_forward_fn = None
 
+def get_videoprism_model():
+    """Load and initialize the VideoPrism model (JAX/Flax)."""
+    global _flax_model, _loaded_state, _text_tokenizer, _forward_fn
+    
+    if _flax_model is None:
+        # Load model
+        _flax_model = vp.get_model(MODEL_NAME, fprop_dtype=None)  # FP32 by default
+        
+        # Load pretrained weights
+        _loaded_state = vp.load_pretrained_weights(MODEL_NAME)
+        
+        # Load text tokenizer
+        _text_tokenizer = vp.load_text_tokenizer('c4_en')
+        
+        # Define and JIT-compile forward function
+        @jax.jit
+        def forward_fn(inputs, text_token_ids, text_paddings, train=False):
+            return _flax_model.apply(
+                _loaded_state,
+                inputs,
+                text_token_ids,
+                text_paddings,
+                train=train,
+            )
+        
+        _forward_fn = forward_fn
+    
+    return _flax_model, _loaded_state, _text_tokenizer, _forward_fn
 
 # ------------------------------------------------------------------
 # Main analysis function
 # ------------------------------------------------------------------
-def analyze_video(video_path: str, text_prompt: str) -> dict:
-    """Run VideoPrism analysis on a video."""
+def analyze_video(video_path: str, text_prompt: str = "") -> dict:
+    """Run VideoPrism video-text matching."""
     if video_path is None:
         return {"error": "Please upload a video file."}
 
@@ -148,55 +151,79 @@ def analyze_video(video_path: str, text_prompt: str) -> dict:
         video_file = tmp.name
 
     try:
-        # Extract video features
-        video_emb = extract_video_features(video_file)
-
-        # 1. Video Classification
-        category, cat_scores = zero_shot_classify(video_emb, VIDEO_CATEGORIES)
-
-        # 2. Emotion Detection
-        emotion, emo_scores = zero_shot_classify(video_emb, EMOTION_LABELS)
-
-        # 3. Custom prompt classification (if provided)
-        custom_result = None
-        custom_scores = None
-        if text_prompt and text_prompt.strip():
-            # Treat prompt as a question and compare with yes/no
-            custom_labels = [f"yes, {text_prompt}", f"no, {text_prompt}"]
-            custom_result, custom_scores = zero_shot_classify(video_emb, custom_labels)
-
-        # Build explanation
-        top_categories = sorted(cat_scores.items(), key=lambda x: x[1], reverse=True)[:3]
-        top_emotions = sorted(emo_scores.items(), key=lambda x: x[1], reverse=True)[:3]
-
-        explanation = (
-            f"This video appears to be about **{category}**.\n\n"
-            f"**Emotional Tone:** {emotion}\n\n"
-            f"**Top Categories:**\n"
+        # Load model
+        flax_model, loaded_state, text_tokenizer, forward_fn = get_videoprism_model()
+        
+        # Preprocess video (like Colab)
+        frames = read_and_preprocess_video(
+            video_file, 
+            target_num_frames=NUM_FRAMES, 
+            target_frame_size=(FRAME_SIZE, FRAME_SIZE)
         )
-        for cat, score in top_categories:
-            explanation += f"  - {cat}: {score:.1%}\n"
-
-        explanation += "\n**Top Emotions:**\n"
-        for emo, score in top_emotions:
-            explanation += f"  - {emo}: {score:.1%}\n"
-
-        if custom_result:
-            explanation += f"\n**Custom Prompt ('{text_prompt}'):** {custom_result}\n"
-
+        frames = jnp.asarray(frames[None, ...])  # Add batch dimension
+        
+        # Prepare text queries
+        if text_prompt.strip():
+            # Use user-provided prompt as a single query
+            text_queries = [text_prompt]
+        else:
+            # Use predefined zero-shot labels
+            text_queries = ZERO_SHOT_LABELS
+        
+        # Apply prompt template (like Colab: 'a video of {}.')
+        text_queries = prepare_text_queries(text_queries, "a video of {}.")
+        
+        # Tokenize text
+        text_ids, text_paddings = vp.tokenize_texts(text_tokenizer, text_queries)
+        
+        # Compute embeddings
+        video_embeddings, text_embeddings, _ = forward_fn(
+            frames, text_ids, text_paddings, train=False
+        )
+        
+        # Compute similarity matrix (like Colab)
+        similarity_matrix = np.dot(
+            np.array(video_embeddings), 
+            np.array(text_embeddings).T
+        )
+        
+        # Apply temperature
+        similarity_matrix /= TEMPERATURE
+        
+        # Apply softmax over texts (to get probabilities)
+        similarity_matrix = np.exp(similarity_matrix)
+        similarity_matrix = similarity_matrix / np.sum(similarity_matrix, axis=1, keepdims=True)
+        
+        # Get results for the first (and only) video
+        similarity_vector = similarity_matrix[0]
+        
+        # Get top-k indices
+        top_indices = np.argsort(similarity_vector)[::-1][:TOP_K]
+        
+        # Format results
+        results = []
+        for rank, idx in enumerate(top_indices, start=1):
+            label = text_queries[idx].replace("a video of ", "").rstrip(".")
+            score = float(similarity_vector[idx])
+            results.append({
+                "rank": rank,
+                "label": label,
+                "similarity": score,
+                "percentage": f"{score*100:.1f}%"
+            })
+        
+        # Determine if we used custom prompt or zero-shot
+        used_custom_prompt = bool(text_prompt.strip())
+        
         return {
             "status": "ok",
-            "model": MODEL_PATH,
-            "device": str(get_video_model().device),
-            "content_category": category,
-            "category_confidence": round(cat_scores[category], 4),
-            "emotion": emotion,
-            "emotion_confidence": round(emo_scores[emotion], 4),
-            "top_categories": top_categories,
-            "top_emotions": top_emotions,
-            "custom_prompt_result": custom_result,
-            "custom_prompt_scores": custom_scores,
-            "explanation": explanation,
+            "model": MODEL_NAME,
+            "frames_used": NUM_FRAMES,
+            "frame_size": FRAME_SIZE,
+            "temperature": TEMPERATURE,
+            "used_custom_prompt": used_custom_prompt,
+            "results": results,
+            "top_prediction": results[0] if results else None,
         }
 
     except Exception as exc:
@@ -211,31 +238,65 @@ def analyze_video(video_path: str, text_prompt: str) -> dict:
 # ------------------------------------------------------------------
 # Gradio UI
 # ------------------------------------------------------------------
-with gr.Blocks(title="VideoPrism Video Analysis") as demo:
-    gr.Markdown("# VideoPrism Video Understanding")
+with gr.Blocks(title="VideoPrism Video-Text Matching") as demo:
+    gr.Markdown("# VideoPrism Video-Text Understanding")
     gr.Markdown(
-        "Uses `google/videoprism-base-f16r288` for video feature extraction "
-        "and zero-shot classification for content, emotion, and custom prompts."
+        "Uses the official [VideoPrism](https://github.com/google-deepmind/videoprism) "
+        "video foundation model for joint video-text encoding. "
+        "Follows the [Colab demo](https://colab.research.google.com/github/google-deepmind/videoprism/blob/main/videoprism/colabs/videoprism_video_text_demo.ipynb)."
     )
 
     with gr.Row():
         with gr.Column():
             video_input = gr.Video(label="Upload Video")
             text_input = gr.Textbox(
-                label="Custom Prompt (Optional)",
-                placeholder="e.g., Is this video suitable for children?",
+                label="Optional: Custom text prompt (otherwise uses predefined categories)",
+                placeholder="e.g., 'a person playing guitar' or leave empty for zero-shot classification",
                 lines=2,
             )
-            analyze_btn = gr.Button("Analyze", variant="primary")
+            analyze_btn = gr.Button("Analyze Video", variant="primary")
 
         with gr.Column():
-            output_text = gr.Textbox(label="Analysis Result", lines=20)
+            output_text = gr.Textbox(label="Results", lines=20)
+            # Alternative: use JSON for structured output
+            # output_json = JSON(label="Results")
 
     def _analyze(video, text):
         result = analyze_video(video, text)
         if "error" in result:
             return f"ERROR: {result['error']}"
-        return result.get("explanation", "No output")
+        
+        if result["status"] != "ok":
+            return f"Unexpected error: {result}"
+        
+        # Format output for display
+        output_lines = []
+        output_lines.append(f"Model: {result['model']}")
+        output_lines.append(f"Frames: {result['frames_used']} @ {result['frame_size']}x{result['frame_size']}")
+        output_lines.append(f"Temperature: {result['temperature']}")
+        output_lines.append("")
+        
+        if result["used_custom_prompt"]:
+            output_lines.append("Using custom text prompt:")
+            output_lines.append(f"  > {text}")
+            output_lines.append("")
+        else:
+            output_lines.append("Using zero-shot classification with predefined categories")
+            output_lines.append("")
+        
+        output_lines.append("Top matches:")
+        output_lines.append("-" * 40)
+        
+        for res in result["results"]:
+            output_lines.append(
+                f"{res['rank']}. {res['label']:<30} {res['similarity']:.4f} ({res['percentage']})"
+            )
+        
+        output_lines.append("")
+        output_lines.append(f"Best match: {result['top_prediction']['label']} "
+                          f"({result['top_prediction']['similarity']:.3f})")
+        
+        return "\n".join(output_lines)
 
     analyze_btn.click(
         fn=_analyze,
