@@ -1,4 +1,4 @@
-# PLM Video Understanding – Docker Space
+# VideoPrism Video Understanding – Docker Space
 FROM python:3.12-slim
 
 # Install system deps (ffmpeg for video decoding)
