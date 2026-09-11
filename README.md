@@ -1,34 +1,36 @@
 ---
-title: VideoPrism Video Analysis
-emoji: 🎬
-colorFrom: green
+title: PLM Video Analysis
+emoji: 🎥
+colorFrom: purple
 colorTo: blue
 sdk: docker
 app_port: 7860
 pinned: false
 ---
 
-# VideoPrism Video Analysis
+# PLM Video Analysis (Local Model)
 
-This Hugging Face Space runs `google/videoprism-base-f16r288` locally for video understanding.
+This Hugging Face Space runs `facebook/Perception-LM-1B` locally for video understanding.
 
 ## How it works
 
 1. Upload a video
-2. Enter an optional custom prompt/question
-3. The Space extracts video features using VideoPrism
-4. Performs zero-shot classification for:
-   - **Content category** (sports, cooking, music, travel, etc.)
-   - **Emotion detection** (joy, sadness, anger, fear, surprise, etc.)
-   - **Custom prompt matching** (yes/no classification for your question)
-5. Returns a structured explanation with confidence scores
-
-## Model
-
-- **Video encoder:** `google/videoprism-base-f16r288` (114M params)
-- **Text encoder:** `sentence-transformers/all-MiniLM-L6-v2`
-- **Approach:** Zero-shot classification via cosine similarity between video and text embeddings
+2. Enter a prompt/question
+3. The Space downloads and runs `facebook/Perception-LM-1B` locally
+4. Uses `decord` video backend and 32-frame sampling
+5. Generates a response directly from the model
 
 ## Hardware
 
-This Space works on both CPU and GPU tiers. GPU is recommended for faster inference.
+This Space requires a **GPU tier** because the model runs locally on CUDA.
+
+## Required Secrets
+
+No secrets required for public models. Ensure the Space has:
+
+- Sufficient disk space for the 1B model download
+- GPU hardware tier
+
+## Implementation
+
+This implementation mirrors `tests/plm2.py` but accepts user-uploaded videos instead of downloading from a dataset.
